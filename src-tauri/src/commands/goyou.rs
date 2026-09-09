@@ -268,6 +268,18 @@ fn matching_singbox(pid: u32) -> bool {
         })
         .unwrap_or(false)
 }
+#[cfg(unix)]
+fn matching_legacy_singbox(pid: u32) -> bool {
+    let config = legacy_dir().join("sing-box.json");
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|output| {
+            let command = String::from_utf8_lossy(&output.stdout);
+            command.contains("sing-box") && command.contains(&config.to_string_lossy().to_string())
+        })
+        .unwrap_or(false)
+}
 #[cfg(windows)]
 fn matching_singbox(pid: u32) -> bool {
     hidden_command("tasklist")
@@ -279,6 +291,10 @@ fn matching_singbox(pid: u32) -> bool {
                 .contains("\"sing-box.exe\"")
         })
         .unwrap_or(false)
+}
+#[cfg(windows)]
+fn matching_legacy_singbox(_pid: u32) -> bool {
+    false
 }
 #[cfg(windows)]
 fn matching_tunnel(_pid: u32) -> bool {
@@ -315,6 +331,25 @@ fn discover_existing_singbox() -> Option<u32> {
         })
         .filter(|pid| matching_singbox(*pid))
 }
+#[cfg(unix)]
+fn discover_existing_legacy_singbox() -> Option<u32> {
+    Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{PORT}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()?
+                .parse()
+                .ok()
+        })
+        .filter(|pid| matching_legacy_singbox(*pid))
+}
+#[cfg(windows)]
+fn discover_existing_legacy_singbox() -> Option<u32> {
+    None
+}
 fn singbox_config_file() -> PathBuf {
     file()
         .parent()
@@ -327,6 +362,51 @@ fn bundled_singbox_path(app: &AppHandle) -> Option<PathBuf> {
         .into_iter()
         .map(|name| resource_dir.join(name))
         .find(|path| path.is_file())
+}
+fn terminate_process(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let terminated = Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .map_err(|e| format!("无法停止代理进程：{e}"))?;
+        if !terminated.success() {
+            return Err("无法停止代理进程。".into());
+        }
+        for _ in 0..20 {
+            if !alive(pid) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let killed = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .map_err(|e| format!("无法强制停止代理进程：{e}"))?;
+        if !killed.success() || alive(pid) {
+            return Err("代理进程未能停止。".into());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let terminated = hidden_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()
+            .map_err(|e| format!("无法停止代理进程：{e}"))?;
+        if !terminated.status.success() && alive(pid) {
+            return Err("代理进程未能停止。".into());
+        }
+    }
+    Ok(())
+}
+fn ensure_port_available() -> Result<(), String> {
+    if let Some(pid) = discover_existing_legacy_singbox() {
+        terminate_process(pid)?;
+    }
+    if port_open() {
+        return Err("127.0.0.1:7890 已被其他进程占用。".into());
+    }
+    Ok(())
 }
 fn singbox_program(app: &AppHandle) -> Result<PathBuf, String> {
     let configured = std::env::var("GOYOU_SING_BOX_PATH")
@@ -362,9 +442,7 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     if status().tunnel_running {
         return Ok(());
     }
-    if port_open() {
-        return Err("127.0.0.1:7890 已被其他进程占用。".into());
-    }
+    ensure_port_available()?;
     let config_path = singbox_config_file();
     fs::create_dir_all(config_path.parent().ok_or("invalid sing-box config path")?)
         .map_err(|e| format!("无法创建 sing-box 配置目录: {e}"))?;
@@ -657,9 +735,7 @@ fn start() -> Result<(), String> {
     if status().tunnel_running {
         return Ok(());
     }
-    if port_open() {
-        return Err("127.0.0.1:7890 已被其他进程占用。".into());
-    }
+    ensure_port_available()?;
     let known_hosts = known_hosts_file();
     fs::create_dir_all(known_hosts.parent().ok_or("invalid known hosts path")?)
         .map_err(|e| format!("无法创建 SSH 配置目录: {e}"))?;
