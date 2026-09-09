@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>GoYou</string>
+  <key>CFBundleDisplayName</key>
+  <string>GoYou</string>
+  <!-- 使用与登录页一致的 GoYou 图标作为应用及程序坞图标 -->
+  <key>CFBundleIconFile</key>
+  <string>icon.icns</string>
+  <key>CFBundleIconName</key>
+  <string>icon</string>
+  <!-- 注册 ccswitch:// 自定义 URL 协议，用于深链接导入 -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>CC Switch Deep Link</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>ccswitch</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

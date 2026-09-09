@@ -1,0 +1,28 @@
+[Unit]
+Description=GoYou reverse SSH tunnel to management relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goyou-tunnel
+ExecStart=/usr/bin/ssh -N -T \
+  -p 12581 \
+  -i /var/lib/goyou-tunnel/tunnel_ed25519 \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/var/lib/goyou-tunnel/known_hosts \
+  -R 127.0.0.1:19080:127.0.0.1:1080 \
+  goyou-tunnel@81.69.20.120
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GoYou 系统拓扑图</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172a41;
+        --muted: #687b90;
+        --line: #cdd9e5;
+        --blue: #1769aa;
+        --blue-soft: #eaf4fb;
+        --purple: #7652a8;
+        --purple-soft: #f1ecfa;
+        --green: #167354;
+        --green-soft: #e8f7ef;
+        --orange: #a56a13;
+        --orange-soft: #fff4dd;
+        --red: #b42318;
+        --red-soft: #fff0ef;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: #f4f7fa;
+        line-height: 1.5;
+      }
+      .page {
+        width: min(1500px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 36px 0 64px;
+      }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { margin-bottom: 8px; font-size: clamp(28px, 4vw, 44px); letter-spacing: -0.04em; }
+      h2 { margin-bottom: 12px; font-size: 22px; }
+      h3 { margin-bottom: 8px; font-size: 16px; }
+      .subtitle { max-width: 850px; color: var(--muted); font-size: 16px; }
+      .notice {
+        margin: 24px 0;
+        padding: 16px 18px;
+        border-left: 4px solid var(--blue);
+        border-radius: 10px;
+        background: var(--blue-soft);
+      }
+      .section {
+        margin-top: 28px;
+        padding: 24px;
+        border: 1px solid #dce5ed;
+        border-radius: 16px;
+        background: white;
+        box-shadow: 0 12px 35px #183d5b0b;
+      }
+      .diagram {
+        display: grid;
+        grid-template-columns: 1fr 52px 1.12fr 52px 1.12fr;
+        gap: 14px;
+        align-items: stretch;
+        overflow-x: auto;
+        padding: 12px 4px 18px;
+      }
+      .zone {
+        min-width: 240px;
+        padding: 16px;
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+      }
+      .zone h3 { display: flex; justify-content: space-between; gap: 8px; }
+      .zone small { color: var(--muted); font-weight: 500; }
+      .zone.client { background: #f8fbfe; border-color: #b9d8ed; }
+      .zone.control { background: #fbf9ff; border-color: #d3c3eb; }
+      .zone.relay { background: #fffaf1; border-color: #ead39e; }
+      .zone.egress { background: #f7fcf9; border-color: #b9dfcd; }
+      .node {
+        margin-top: 10px;
+        padding: 12px;
+        border: 1px solid #dce5ed;
+        border-radius: 10px;
+        background: white;
+      }
+      .node strong { display: block; margin-bottom: 3px; }
+      .node span, .node li { color: var(--muted); font-size: 13px; }
+      .node ul { margin: 7px 0 0; padding-left: 18px; }
+      .arrow {
+        display: grid;
+        place-items: center;
+        color: var(--blue);
+        font-size: 30px;
+        font-weight: 800;
+      }
+      .arrow small { display: block; color: var(--muted); font-size: 11px; font-weight: 600; text-align: center; }
+      .path {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0;
+        margin: 4px 0 18px;
+        padding: 14px 0;
+        border-top: 1px solid #edf1f5;
+        border-bottom: 1px solid #edf1f5;
+      }
+      .step { position: relative; padding: 0 12px; text-align: center; }
+      .step:not(:last-child)::after {
+        content: "→";
+        position: absolute;
+        top: 7px;
+        right: -7px;
+        color: var(--blue);
+        font-size: 22px;
+        font-weight: 800;
+      }
+      .step b { display: block; color: var(--blue); font-size: 13px; }
+      .step span { color: var(--muted); font-size: 12px; }
+      .flows { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+      .flow { padding: 16px; border-radius: 12px; background: #f8fafc; }
+      .flow.control-flow { border: 1px solid #d7c9ed; background: var(--purple-soft); }
+      .flow.data-flow { border: 1px solid #efd9a7; background: var(--orange-soft); }
+      .flow ol { margin: 8px 0 0; padding-left: 22px; }
+      .flow li { margin: 6px 0; color: #42566d; font-size: 14px; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { padding: 11px 12px; border-bottom: 1px solid #e6edf3; text-align: left; vertical-align: top; }
+      th { color: #53687e; background: #f7f9fb; font-size: 12px; }
+      td code, p code { padding: 2px 5px; border-radius: 4px; background: #eef2f6; color: #334e68; font-size: 12px; }
+      .good { color: var(--green); font-weight: 700; }
+      .warn { color: var(--orange); font-weight: 700; }
+      .bad { color: var(--red); font-weight: 700; }
+      .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; color: var(--muted); font-size: 13px; }
+      .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; background: var(--blue); }
+      .legend .control::before { background: var(--purple); }
+      .legend .relay::before { background: var(--orange); }
+      .legend .egress::before { background: var(--green); }
+      @media (max-width: 900px) {
+        .page { width: min(100% - 24px, 700px); padding-top: 24px; }
+        .section { padding: 18px; }
+        .flows { grid-template-columns: 1fr; }
+        .path { grid-template-columns: 1fr; gap: 12px; }
+        .step:not(:last-child)::after { content: "↓"; top: auto; right: 50%; bottom: -20px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <h1>GoYou 系统拓扑图</h1>
+      <p class="subtitle">登录控制面、桌面端本地代理客户端、管理服务器中转节点、服务器间隧道和真实出口服务器的完整关系。</p>
+
+      <div class="notice">
+        <strong>关键结论：</strong>最终用户只下载 GoYou、登录并点击“开启代理”即可。发布包需要自带本机 Shadowsocks 客户端；用户不需要另外安装 sing-box。
+      </div>
+
+      <section class="section">
+        <h2>一、总体拓扑</h2>
+        <div class="diagram">
+          <div class="zone client">
+            <h3>用户设备 <small>macOS / Windows</small></h3>
+            <div class="node">
+              <strong>GoYou 桌面应用</strong>
+              <span>登录、会员状态、开启/关闭代理、连通性检测</span>
+            </div>
+            <div class="node">
+              <strong>本机 Shadowsocks 客户端</strong>
+              <span>发布包内置的 sing-box sidecar，或未来的 Rust 原生实现</span>
+            </div>
+            <div class="node">
+              <strong>本地 SOCKS5</strong>
+              <span><code>127.0.0.1:7890</code>，供系统代理、Git 和其他应用使用</span>
+            </div>
+          </div>
+
+          <div class="arrow">→<small>HTTPS 登录<br />租约</small></div>
+
+          <div class="zone control">
+            <h3>管理服务器 <small>控制面</small></h3>
+            <div class="node">
+              <strong>FastAPI 管理 API</strong>
+              <ul>
+                <li>账号密码、JWT、刷新令牌</li>
+                <li>设备注册、会员状态、租约</li>
+                <li>节点管理、限流、审计</li>
+              </ul>
+            </div>
+            <div class="node">
+              <strong>数据库</strong>
+              <span>开发阶段 SQLite；生产阶段可切 PostgreSQL</span>
+            </div>
+            <div class="node">
+              <strong>管理后台</strong>
+              <span>管理员修改用户、节点、租约和策略</span>
+            </div>
+          </div>
+
+          <div class="arrow">→<small>Shadowsocks<br />加密数据流</small></div>
+
+          <div class="zone relay">
+            <h3>管理服务器 <small>数据面</small></h3>
+            <div class="node">
+              <strong>sing-box relay</strong>
+              <span>接收 GoYou 客户端连接；管理服务器承载中转流量</span>
+            </div>
+            <div class="node">
+              <strong>SSH / WireGuard 隧道入口</strong>
+              <span>通过私有链路访问真实出口服务器，不把出口直接暴露给用户</span>
+            </div>
+          </div>
+
+          <div class="arrow">→<small>私有隧道<br />转发</small></div>
+
+          <div class="zone egress">
+            <h3>真实代理服务器 <small>出口面</small></h3>
+            <div class="node">
+              <strong>sing-box egress</strong>
+              <span>只通过隧道接受管理服务器流量</span>
+            </div>
+            <div class="node">
+              <strong>direct outbound</strong>
+              <span>由这台服务器访问 GitHub 和其他互联网目标</span>
+            </div>
+          </div>
+        </div>
+        <div class="legend">
+          <span>客户端与本地数据面</span>
+          <span class="control">控制面</span>
+          <span class="relay">中转数据面</span>
+          <span class="egress">互联网出口</span>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>二、两条独立链路</h2>
+        <div class="flows">
+          <div class="flow control-flow">
+            <h3>控制链路：登录和授权</h3>
+            <ol>
+              <li>GoYou 调用管理 API 登录。</li>
+              <li>API 返回 access token、refresh token 和代理租约。</li>
+              <li>GoYou 定期刷新令牌和租约。</li>
+              <li>账号到期、禁用或设备撤销后，API 停止续发租约。</li>
+            </ol>
+          </div>
+          <div class="flow data-flow">
+            <h3>数据链路：实际代理流量</h3>
+            <ol>
+              <li>浏览器、Git 或系统应用连接本机 <code>127.0.0.1:7890</code>。</li>
+              <li>本机客户端将 SOCKS 请求封装为 Shadowsocks。</li>
+              <li>管理服务器 relay 接收并转发到出口服务器。</li>
+              <li>出口服务器访问目标网站并返回响应。</li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>三、用户点击“开启代理”时发生什么</h2>
+        <div class="path">
+          <div class="step"><b>1. 校验登录</b><span>检查 token 和会员状态</span></div>
+          <div class="step"><b>2. 获取租约</b><span>节点地址、端口、密码、过期时间</span></div>
+          <div class="step"><b>3. 启动本机客户端</b><span>使用内置 sing-box 或原生实现</span></div>
+          <div class="step"><b>4. 监听本地端口</b><span>确认 127.0.0.1:7890 可用</span></div>
+          <div class="step"><b>5. 开启系统代理</b><span>浏览器、Git 等应用开始走代理</span></div>
+        </div>
+        <p class="good">关闭代理时，GoYou 会停止本机客户端并恢复系统代理；不会停止远程服务器上的 relay 或 egress。</p>
+      </section>
+
+      <section class="section">
+        <h2>四、普通用户是否需要安装 sing-box</h2>
+        <table>
+          <thead><tr><th>方式</th><th>用户是否需要安装</th><th>说明</th><th>建议</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>GoYou 内置 sing-box sidecar</td>
+              <td class="good">不需要</td>
+              <td>将 macOS/Windows 对应二进制随安装包发布，由 GoYou 启停。</td>
+              <td class="good">第一版推荐</td>
+            </tr>
+            <tr>
+              <td>GoYou 内置 Rust Shadowsocks 客户端</td>
+              <td class="good">不需要</td>
+              <td>不依赖外部进程，但需要自行实现加密、协议、DNS、IPv6 和跨平台网络细节。</td>
+              <td>后续优化</td>
+            </tr>
+            <tr>
+              <td>用户自行安装 sing-box</td>
+              <td class="bad">需要</td>
+              <td>只适合开发阶段验证，不适合作为正式用户体验。</td>
+              <td class="warn">仅开发环境</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section">
+        <h2>五、为什么不能让系统直接连接管理服务器 relay</h2>
+        <p>当前 relay 对外提供的是 Shadowsocks 协议，而 macOS/Windows 的系统代理设置通常只支持普通 HTTP 或 SOCKS5，不理解 Shadowsocks。于是本机需要一个协议转换层：</p>
+        <p><code>系统 SOCKS5 → 本机 Shadowsocks 客户端 → 远端 Shadowsocks relay</code></p>
+        <p>如果未来把 relay 改成公网 SOCKS5，理论上可以取消本机客户端，但会暴露普通代理端口、增加账号滥用风险，也失去 Shadowsocks 的加密封装，因此不建议。</p>
+      </section>
+
+      <section class="section">
+        <h2>六、推荐落地顺序</h2>
+        <ol>
+          <li>开发阶段允许使用 Homebrew 安装 sing-box，验证登录、租约和完整链路。</li>
+          <li>为 macOS Intel、macOS Apple Silicon、Windows x64 分别准备 sing-box sidecar。</li>
+          <li>将 sidecar 加入 Tauri 的 resources，并由 Rust 根据平台选择对应文件。</li>
+          <li>发行包签名；macOS 对主应用和 sidecar 一并签名并 notarize。</li>
+          <li>GoYou 首次启动只需登录，不要求用户安装任何额外软件。</li>
+          <li>后续再评估用 Rust 原生 Shadowsocks 实现替换 sidecar。</li>
+        </ol>
+      </section>
+    </main>
+  </body>
+</html>

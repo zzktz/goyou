@@ -1,0 +1,13 @@
+services:
+  relay:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: goyou-relay
+    restart: unless-stopped
+    network_mode: host
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    read_only: true
+    volumes:
+      - ./config.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

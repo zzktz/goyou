@@ -1,0 +1,44 @@
+node_modules/
+dist/
+.vite/
+release/
+.DS_Store
+*.log
+.env
+.env.local
+.tauri-updater.key
+.tauri-updater.key.pub
+*.sig
+*.tsbuildinfo
+.npmrc
+CLAUDE.md
+# AGENTS.md
+GEMINI.md
+/.claude
+/.codex
+/.gemini
+/.cc-switch
+/.idea
+/.vscode
+vitest-report.json
+nul
+
+# Flatpak build artifacts
+flatpak/cc-switch.deb
+flatpak-build/
+flatpak-repo/
+.worktrees/
+.spec-workflow/
+copilot-api
+.history
+CODEBUDDY.md
+.github
+mainWindow.js
+.tools/
+src-tauri/resources/sing-box/sing-box
+src-tauri/resources/sing-box/sing-box.exe
+/temp/
+
+# Local-only deployment details and credentials (never commit)
+docs/敏感信息.md
+docs/敏感信息.local.md

@@ -1,0 +1,31 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/dev/stderr"
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "public-ss",
+      "listen": "0.0.0.0",
+      "listen_port": 24443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "REPLACE_WITH_SERVER_GENERATED_PASSWORD"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "egress-tunnel",
+      "server": "127.0.0.1",
+      "server_port": 19080
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "final": "egress-tunnel"
+  }
+}
