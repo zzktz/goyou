@@ -593,6 +593,49 @@ dd.state {
   color: #586b7e;
   font-size: 12px;
 }
+.traffic-card {
+  margin-top: 17px;
+  padding: 12px 14px;
+  border: 1px solid #dce4eb;
+  border-radius: 7px;
+  background: #f8fbfd;
+}
+.traffic-card.exceeded {
+  border-color: #f3d7d4;
+  background: #fff5f4;
+}
+.traffic-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #586b7e;
+  font-size: 12px;
+}
+.traffic-card-header strong {
+  color: #283c52;
+  font-size: 12px;
+}
+.traffic-progress {
+  height: 6px;
+  margin: 9px 0 7px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #dce8f0;
+}
+.traffic-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1769aa;
+  transition: width 0.3s ease;
+}
+.traffic-card.exceeded .traffic-progress span {
+  background: #c94b45;
+}
+.traffic-card small {
+  color: #738295;
+  font-size: 11px;
+}
 input[type="checkbox"] {
   margin: 0 7px 0 0;
   accent-color: #1769aa;

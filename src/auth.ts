@@ -20,6 +20,21 @@ export interface ProxyLease {
   username: string;
   password: string;
   expires_at: string;
+  quota_exceeded?: boolean;
+}
+
+export interface UsageSummary {
+  date: string;
+  used_bytes: number;
+  upload_bytes: number;
+  download_bytes: number;
+  quota_bytes: number;
+  remaining_bytes: number;
+  percentage: number;
+  exceeded: boolean;
+  exceeded_at: string | null;
+  resets_at: string;
+  timezone: string;
 }
 
 interface AuthResponse {
@@ -45,7 +60,9 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     throw new Error("无法连接管理服务器，请检查网络或稍后重试");
   }
   const body = (await response.json().catch(() => null)) as
-    { detail?: string } | T | null;
+    | { detail?: string }
+    | T
+    | null;
   if (!response.ok) {
     const detail =
       body && typeof body === "object" && "detail" in body
@@ -135,6 +152,15 @@ export async function refreshSession(
     body: JSON.stringify({ lease_id: session.lease.lease_id }),
   });
   return saveSession({ ...response, lease });
+}
+
+export async function getTodayUsage(
+  session: AuthSession,
+): Promise<UsageSummary> {
+  return request<UsageSummary>("/v1/usage/today", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${session.token}` },
+  });
 }
 
 async function authenticate(response: AuthResponse): Promise<AuthSession> {

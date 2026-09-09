@@ -70,7 +70,6 @@ pub struct Status {
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub github_reachable: bool,
-    pub google_reachable: bool,
     pub latency_ms: u64,
     pub git_proxy_configured: bool,
     pub git_proxy_matches_tunnel: bool,
@@ -940,43 +939,29 @@ pub async fn diagnose_goyou() -> Diagnostic {
     if !s.tunnel_running {
         return Diagnostic {
             github_reachable: false,
-            google_reachable: false,
             latency_ms: 0,
             git_proxy_configured: false,
             git_proxy_matches_tunnel: false,
             error: Some("本地代理进程未运行。".into()),
         };
     }
-    let started = Instant::now();
     let client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(format!("socks5://{HOST}:{PORT}")).unwrap())
         .user_agent("GoYou/1.0")
         .timeout(Duration::from_secs(15))
         .build();
-    let (github_outcome, google_outcome) = match client {
-        Ok(c) => {
-            let github = c
-                .get("https://api.github.com/rate_limit")
-                .send()
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            let google = c
-                .get("https://www.google.com/")
-                .send()
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
-            (github, google)
-        }
-        Err(e) => {
-            let error = e.to_string();
-            (Err(error.clone()), Err(error))
-        }
+    let started = Instant::now();
+    let github_outcome = match client {
+        Ok(c) => c
+            .head("https://github.com/")
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
     };
     let github_reachable = github_outcome.is_ok();
-    let google_reachable = google_outcome.is_ok();
-    let error = github_outcome.err().or_else(|| google_outcome.err());
+    let error = github_outcome.err();
     let proxies: [String; 2] = ["http.proxy", "https.proxy"].map(|k| {
         Command::new("git")
             .args(["config", "--global", "--get", k])
@@ -989,7 +974,6 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let matches = proxies.iter().any(|v| v.contains("127.0.0.1:7890"));
     Diagnostic {
         github_reachable,
-        google_reachable,
         latency_ms: started.elapsed().as_millis() as u64,
         git_proxy_configured: configured,
         git_proxy_matches_tunnel: matches,

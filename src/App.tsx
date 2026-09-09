@@ -1,9 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import appPackage from "../package.json";
-import { getSession, login, logout, refreshSession } from "./auth";
-import type { AuthSession } from "./auth";
+import {
+  getSession,
+  getTodayUsage,
+  login,
+  logout,
+  refreshSession,
+} from "./auth";
+import type { AuthSession, UsageSummary } from "./auth";
 
 interface Status {
   state: "on" | "off" | "error";
@@ -18,7 +24,6 @@ interface Status {
 
 interface Diagnostic {
   githubReachable: boolean;
-  googleReachable: boolean;
   latencyMs: number;
   gitProxyConfigured: boolean;
   gitProxyMatchesTunnel: boolean;
@@ -147,6 +152,8 @@ function Dashboard({
   >(null);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [message, setMessage] = useState("尚未检测网络连通性");
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const autoClosedDate = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     const [next, launch] = await Promise.all([
@@ -155,7 +162,12 @@ function Dashboard({
     ]);
     setStatus(next);
     setAutoLaunch(launch);
-  }, []);
+    try {
+      setUsage(await getTodayUsage(session));
+    } catch {
+      // Usage reporting is optional while the control plane is unavailable.
+    }
+  }, [session]);
 
   useEffect(() => {
     void refresh();
@@ -177,6 +189,10 @@ function Dashboard({
 
   const enable = async () => {
     if (!status) return;
+    if (usage?.exceeded) {
+      setMessage("今日流量额度已用尽，代理将在明日 00:00 后恢复");
+      return;
+    }
     setBusy(true);
     setBusyAction("enable");
     try {
@@ -202,20 +218,40 @@ function Dashboard({
       setBusyAction(null);
     }
   };
+  useEffect(() => {
+    if (!usage?.exceeded) {
+      autoClosedDate.current = null;
+      return;
+    }
+    if (
+      !status?.tunnelRunning ||
+      busy ||
+      autoClosedDate.current === usage.date
+    ) {
+      return;
+    }
+    autoClosedDate.current = usage.date;
+    setMessage("今日流量额度已用尽，正在自动关闭代理");
+    void disable()
+      .then(() => setMessage("今日流量额度已用尽，代理已自动关闭"))
+      .catch((error) =>
+        setMessage(`今日流量额度已用尽，但自动关闭失败：${String(error)}`),
+      );
+  }, [busy, status?.tunnelRunning, usage]);
   const diagnose = async () => {
     setBusy(true);
     setBusyAction("network");
     try {
       const result = await invoke<Diagnostic>("diagnose_goyou");
-      const reachability = `GitHub ${result.githubReachable ? "可达" : "不可达"}，Google ${result.googleReachable ? "可达" : "不可达"}`;
+      const reachability = `GitHub ${result.githubReachable ? "可达" : "不可达"}`;
       const gitProxyStatus = result.gitProxyMatchesTunnel
         ? "Git 已指向本地代理"
         : result.gitProxyConfigured
           ? "Git 使用其他代理"
           : "Git 未配置全局代理";
       setMessage(
-        result.githubReachable || result.googleReachable
-          ? `${reachability}；GitHub ${result.latencyMs} ms；${gitProxyStatus}`
+        result.githubReachable
+          ? `${reachability}；耗时 ${result.latencyMs} ms；${gitProxyStatus}`
           : `${reachability}；${result.error ?? "网络不可达"}`,
       );
     } catch (error) {
@@ -235,6 +271,10 @@ function Dashboard({
     } finally {
       setBusy(false);
     }
+  };
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1000000) return `${bytes} B`;
+    return `${(bytes / 1000000).toFixed(bytes >= 1000000000 ? 1 : 0)} MB`;
   };
   const confirmLogout = async () => {
     setBusy(true);
@@ -397,16 +437,32 @@ function Dashboard({
               checked={status?.gitProxyEnabled ?? false}
               disabled={busy}
               onChange={(event) =>
-                void setStartup(
-                  "set_goyou_git_proxy",
-                  event.target.checked,
-                )
+                void setStartup("set_goyou_git_proxy", event.target.checked)
               }
               type="checkbox"
             />
             Git使用代理
           </label>
         </div>
+        {usage && (
+          <div className={`traffic-card ${usage.exceeded ? "exceeded" : ""}`}>
+            <div className="traffic-card-header">
+              <span>今日流量</span>
+              <strong>
+                {formatBytes(usage.used_bytes)} /{" "}
+                {formatBytes(usage.quota_bytes)}
+              </strong>
+            </div>
+            <div className="traffic-progress" aria-hidden="true">
+              <span style={{ width: `${Math.min(usage.percentage, 100)}%` }} />
+            </div>
+            <small>
+              {usage.exceeded
+                ? "今日额度已用尽，代理已关闭"
+                : `剩余 ${formatBytes(usage.remaining_bytes)}，${new Date(usage.resets_at).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })} 重置`}
+            </small>
+          </div>
+        )}
         <p className={`message ${status?.lastError ? "error" : ""}`}>
           {status?.lastError ?? message}
         </p>
