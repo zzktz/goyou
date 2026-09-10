@@ -1,6 +1,6 @@
 {
   "name": "goyou",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "GoYou desktop proxy client",
   "type": "module",
   "scripts": {

@@ -444,6 +444,12 @@ function Dashboard({
     setBusy(true);
     setBusyAction("disable");
     setMessage("正在关闭代理…");
+    // Let React paint the loading state before the native command starts. On
+    // Windows the IPC call can otherwise occupy the current frame, making the
+    // button look unresponsive until the proxy has already stopped.
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
     try {
       await invoke("disable_goyou");
       await refresh();

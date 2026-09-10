@@ -2,7 +2,7 @@ use crate::auto_launch;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::{SocketAddr, TcpStream},
+    net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -514,6 +514,21 @@ fn singbox_program(app: &AppHandle) -> Result<PathBuf, String> {
         "sing-box"
     }))
 }
+fn resolve_relay_host(host: &str, port: u16) -> Result<String, String> {
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(host.to_owned());
+    }
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("无法解析代理节点地址 {host}：{error}"))?;
+    addresses
+        .filter_map(|address| match address.ip() {
+            IpAddr::V4(ip) => Some(ip.to_string()),
+            IpAddr::V6(_) => None,
+        })
+        .next()
+        .ok_or_else(|| format!("代理节点地址 {host} 没有可用的 IPv4 地址"))
+}
 fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     if lease.host.trim().is_empty()
         || lease.method.trim().is_empty()
@@ -526,10 +541,39 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     }
     ensure_port_available()?;
     let config_path = singbox_config_file();
+    // Resolve the relay endpoint before enabling DNS-over-relay. Otherwise a
+    // hostname relay could create a dependency cycle: remote DNS uses the
+    // relay, while the relay itself still needs to be resolved.
+    let relay_host = resolve_relay_host(&lease.host, lease.port)?;
     fs::create_dir_all(config_path.parent().ok_or("invalid sing-box config path")?)
         .map_err(|e| format!("无法创建 sing-box 配置目录: {e}"))?;
     let config = serde_json::json!({
         "log": { "level": "warn" },
+        // Resolve destination domains through encrypted DNS over the relay.
+        // This keeps proxy access working when the local network DNS cannot
+        // resolve a site (for example, stitch.withgoogle.com).
+        "dns": {
+            "servers": [
+                {
+                    "tag": "bootstrap",
+                    "address": "223.5.5.5"
+                },
+                {
+                    "tag": "cloudflare",
+                    "address": "tls://1dot1dot1dot1.cloudflare-dns.com",
+                    "address_resolver": "bootstrap",
+                    "detour": "relay"
+                },
+                {
+                    "tag": "google",
+                    "address": "tls://dns.google",
+                    "address_resolver": "bootstrap",
+                    "detour": "relay"
+                }
+            ],
+            "final": "cloudflare",
+            "strategy": "prefer_ipv4"
+        },
         "inbounds": [{
             "type": "mixed",
             "tag": "local-proxy",
@@ -539,7 +583,7 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
         "outbounds": [{
             "type": "shadowsocks",
             "tag": "relay",
-            "server": lease.host,
+            "server": relay_host,
             "server_port": lease.port,
             "method": lease.method,
             "password": lease.password
@@ -1024,7 +1068,10 @@ pub async fn diagnose_goyou() -> Diagnostic {
         };
     }
     let client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("socks5://{HOST}:{PORT}")).unwrap())
+        // `socks5h` delegates hostname resolution to sing-box. Using plain
+        // `socks5` would resolve the test domain with the local DNS first and
+        // report a false failure on networks with broken DNS.
+        .proxy(reqwest::Proxy::all(format!("socks5h://{HOST}:{PORT}")).unwrap())
         .user_agent("GoYou/1.0")
         .timeout(Duration::from_secs(15))
         .build();
