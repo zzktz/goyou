@@ -35,13 +35,14 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/users/{user_id}/usage`
 - `GET /v1/admin/usage`
 - `POST /v1/internal/usage/report` (trusted relay metering adapter)
+- `GET /v1/internal/relay/leases` (trusted relay configuration sync)
 - `GET /healthz`
 
 管理员账号由 `ADMIN_EMAIL` 与 `ADMIN_PASSWORD_HASH`（推荐）或 `ADMIN_PASSWORD` 配置，不与客户端普通用户账号共用令牌。管理员令牌的 JWT 类型独立为 `admin_access`，不能调用客户端接口。
 
 客户端生产 API 地址记录在本机 `docs/敏感信息.md`。构建客户端时可通过 `VITE_API_BASE_URL` 覆盖默认地址。
 
-当前租约接口返回 relay 的固定测试凭据并写入控制面记录，尚未按用户生成独立 sing-box 入口凭据；下一步需要将租约创建/撤销同步到 relay 动态配置。
+新租约会分配独立 Shadowsocks 凭据和 relay 端口（默认 `30000-39999`），计量适配器通过内部同步接口读取这些租约并生成 relay 配置。旧租约会在下一次刷新时迁移到独立凭据。
 
 每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 500 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。`METERING_TOKEN` 只用于可信 relay 计量组件向内部接口上报上传和下载字节数；当前共享 relay 凭据尚不能区分用户，正式启用服务端限额前必须完成独立用户凭据和 relay 计量接入。
 

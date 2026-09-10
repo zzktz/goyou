@@ -1,7 +1,7 @@
 services:
-  relay:
-    build: ./metering
-    container_name: goyou-relay
+  metering:
+    build: .
+    container_name: goyou-relay-metering
     restart: unless-stopped
     network_mode: host
     env_file:

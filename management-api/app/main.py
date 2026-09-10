@@ -35,6 +35,8 @@ ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
 REFRESH_TOKEN_DAYS = int(os.getenv("REFRESH_TOKEN_DAYS", "30"))
 RELAY_HOST = os.getenv("RELAY_HOST", "relay.123371.com")
 RELAY_PORT = int(os.getenv("RELAY_PORT", "24443"))
+RELAY_PORT_START = int(os.getenv("RELAY_PORT_START", "30000"))
+RELAY_PORT_END = int(os.getenv("RELAY_PORT_END", "39999"))
 RELAY_METHOD = os.getenv("RELAY_METHOD", "chacha20-ietf-poly1305")
 RELAY_PASSWORD = os.getenv("RELAY_PASSWORD", "")
 DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "500000000"))
@@ -87,6 +89,24 @@ def ensure_user_quota(connection: sqlite3.Connection, user_id: str) -> sqlite3.R
         (user_id, DEFAULT_DAILY_QUOTA_BYTES, QUOTA_TIMEZONE, iso(now())),
     )
     return connection.execute("SELECT * FROM user_quotas WHERE user_id = ?", (user_id,)).fetchone()
+
+
+def allocate_relay_port(connection: sqlite3.Connection) -> int:
+    used = {
+        int(row[0])
+        for row in connection.execute(
+            "SELECT relay_port FROM leases WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL",
+            (iso(now()),),
+        ).fetchall()
+    }
+    for port in range(RELAY_PORT_START, RELAY_PORT_END + 1):
+        if port != RELAY_PORT and port not in used:
+            return port
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="代理节点当前没有可用端口")
+
+
+def new_relay_credentials(lease_id: str) -> tuple[str, str]:
+    return f"goyou-{lease_id[:12]}", secrets.token_urlsafe(32)
 
 
 def usage_payload(connection: sqlite3.Connection, user_id: str, date: str | None = None) -> dict:
@@ -152,6 +172,7 @@ def init_db() -> None:
                 device_id TEXT,
                 username TEXT NOT NULL,
                 password TEXT NOT NULL,
+                relay_port INTEGER,
                 expires_at TEXT NOT NULL,
                 revoked_at TEXT
             );
@@ -182,6 +203,9 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
             """
         )
+        lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
+        if "relay_port" not in lease_columns:
+            connection.execute("ALTER TABLE leases ADD COLUMN relay_port INTEGER")
 
 
 class RegisterRequest(BaseModel):
@@ -387,18 +411,20 @@ def register_device(payload: DeviceRequest, user: Annotated[sqlite3.Row, Depends
 
 @app.post("/v1/proxy/lease")
 def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
-    if not RELAY_PASSWORD:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="代理节点尚未配置租约凭据")
     lease_id = secrets.token_hex(16)
     expires = now() + timedelta(hours=1)
-    username = "relay"
-    password = RELAY_PASSWORD
+    username, password = new_relay_credentials(lease_id)
     with db() as connection:
-        connection.execute("INSERT INTO leases(id, user_id, device_id, username, password, expires_at) VALUES (?, ?, ?, ?, ?, ?)", (lease_id, user["id"], payload.device_id, username, password, iso(expires)))
+        connection.execute("BEGIN IMMEDIATE")
+        relay_port = allocate_relay_port(connection)
+        connection.execute(
+            "INSERT INTO leases(id, user_id, device_id, username, password, relay_port, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (lease_id, user["id"], payload.device_id, username, password, relay_port, iso(expires)),
+        )
     return {
         "lease_id": lease_id,
         "host": RELAY_HOST,
-        "port": RELAY_PORT,
+        "port": relay_port,
         "method": RELAY_METHOD,
         "username": username,
         "password": password,
@@ -409,22 +435,30 @@ def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(cur
 
 @app.post("/v1/proxy/lease/refresh")
 def refresh_lease(payload: LeaseRefreshRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
-    if not RELAY_PASSWORD:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="代理节点尚未配置租约凭据")
     expires = now() + timedelta(hours=1)
     with db() as connection:
-        lease = connection.execute("SELECT id, device_id, revoked_at FROM leases WHERE id = ? AND user_id = ?", (payload.lease_id, user["id"])).fetchone()
+        connection.execute("BEGIN IMMEDIATE")
+        lease = connection.execute("SELECT id, device_id, username, password, relay_port, revoked_at FROM leases WHERE id = ? AND user_id = ?", (payload.lease_id, user["id"])).fetchone()
         if not lease or lease["revoked_at"]:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="租约不存在或已撤销")
-        connection.execute("UPDATE leases SET expires_at = ?, password = ? WHERE id = ?", (iso(expires), RELAY_PASSWORD, payload.lease_id))
+        username = lease["username"]
+        password = lease["password"]
+        relay_port = lease["relay_port"]
+        if username == "relay" or password == RELAY_PASSWORD or relay_port is None:
+            username, password = new_relay_credentials(payload.lease_id)
+            relay_port = allocate_relay_port(connection)
+        connection.execute(
+            "UPDATE leases SET expires_at = ?, username = ?, password = ?, relay_port = ? WHERE id = ?",
+            (iso(expires), username, password, relay_port, payload.lease_id),
+        )
     return {
         "lease_id": payload.lease_id,
         "device_id": lease["device_id"],
         "host": RELAY_HOST,
-        "port": RELAY_PORT,
+        "port": relay_port,
         "method": RELAY_METHOD,
-        "username": "relay",
-        "password": RELAY_PASSWORD,
+        "username": username,
+        "password": password,
         "expires_at": iso(expires),
         "quota_exceeded": user_usage(user["id"])["exceeded"],
     }
@@ -439,6 +473,15 @@ def report_usage(
         user = connection.execute("SELECT id, disabled FROM users WHERE id = ?", (payload.user_id,)).fetchone()
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+        if user["disabled"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户已停用")
+        if payload.lease_id:
+            lease = connection.execute(
+                "SELECT user_id FROM leases WHERE id = ? AND revoked_at IS NULL",
+                (payload.lease_id,),
+            ).fetchone()
+            if not lease or lease["user_id"] != payload.user_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="租约与用户不匹配")
         if payload.upload_bytes == 0 and payload.download_bytes == 0:
             return usage_payload(connection, payload.user_id)
         report = connection.execute(
@@ -474,6 +517,42 @@ def report_usage(
                 (payload.user_id, date, upload, download, total, iso(now()), exceeded_at),
             )
         return usage_payload(connection, payload.user_id)
+
+
+@app.get("/v1/internal/relay/leases")
+def relay_leases(
+    _agent: Annotated[None, Depends(current_metering_agent)],
+) -> dict:
+    with db() as connection:
+        rows = connection.execute(
+            """SELECT l.id, l.user_id, l.username, l.password, l.relay_port, l.expires_at,
+                      u.email, q.daily_limit_bytes
+               FROM leases l JOIN users u ON u.id = l.user_id
+               LEFT JOIN user_quotas q ON q.user_id = l.user_id
+               LEFT JOIN daily_usage d ON d.user_id = l.user_id AND d.usage_date = ?
+               WHERE l.revoked_at IS NULL AND l.expires_at > ? AND u.disabled = 0
+                 AND l.relay_port IS NOT NULL AND l.username != 'relay'
+                 AND (d.total_bytes IS NULL OR d.total_bytes < COALESCE(q.daily_limit_bytes, ?))""",
+            (usage_date(), iso(now()), DEFAULT_DAILY_QUOTA_BYTES),
+        ).fetchall()
+    return {
+        "generated_at": iso(now()),
+        "host": RELAY_HOST,
+        "method": RELAY_METHOD,
+        "leases": [
+            {
+                "lease_id": row["id"],
+                "user_id": row["user_id"],
+                "email": row["email"],
+                "username": row["username"],
+                "password": row["password"],
+                "port": row["relay_port"],
+                "expires_at": row["expires_at"],
+                "quota_bytes": int(row["daily_limit_bytes"] or DEFAULT_DAILY_QUOTA_BYTES),
+            }
+            for row in rows
+        ],
+    }
 
 
 @app.post("/v1/admin/auth/login")
