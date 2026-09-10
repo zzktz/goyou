@@ -314,6 +314,7 @@ fn discover_existing_tunnel() -> Option<u32> {
         })
         .filter(|pid| matching_tunnel(*pid))
 }
+#[cfg(unix)]
 fn discover_existing_singbox() -> Option<u32> {
     Command::new("pgrep")
         .args([
@@ -330,6 +331,27 @@ fn discover_existing_singbox() -> Option<u32> {
                 .ok()
         })
         .filter(|pid| matching_singbox(*pid))
+}
+#[cfg(windows)]
+fn discover_existing_singbox() -> Option<u32> {
+    let output = hidden_command("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5
+                || !fields[0].eq_ignore_ascii_case("TCP")
+                || !fields[1].ends_with(&format!(":{PORT}"))
+                || !fields[3].eq_ignore_ascii_case("LISTENING")
+            {
+                return None;
+            }
+            fields[4].parse::<u32>().ok()
+        })
+        .find(|pid| matching_singbox(*pid))
 }
 #[cfg(unix)]
 fn discover_existing_legacy_singbox() -> Option<u32> {
@@ -400,7 +422,8 @@ fn terminate_process(pid: u32) -> Result<(), String> {
     Ok(())
 }
 fn ensure_port_available() -> Result<(), String> {
-    if let Some(pid) = discover_existing_legacy_singbox() {
+    let existing = discover_existing_singbox().or_else(discover_existing_legacy_singbox);
+    if let Some(pid) = existing {
         terminate_process(pid)?;
     }
     if port_open() {

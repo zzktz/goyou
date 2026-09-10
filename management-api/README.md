@@ -28,6 +28,7 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/auth/me`
 - `GET /v1/admin/overview`
 - `GET /v1/admin/users`
+- `POST /v1/admin/users`
 - `PATCH /v1/admin/users/{user_id}/status`
 - `GET /v1/admin/leases`
 - `POST /v1/admin/leases/{lease_id}/revoke`

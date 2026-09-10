@@ -100,6 +100,16 @@ def account_expiry_date(value: str | None) -> str | None:
         return None
 
 
+def account_expiry_value(value: str | None, *, default: str | None = None) -> str | None:
+    if not value:
+        return default
+    try:
+        expiry_date = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="到期日期无效") from None
+    return iso(datetime.combine(expiry_date, datetime.max.time().replace(microsecond=0), tzinfo=quota_zone()))
+
+
 def account_is_expired(value: str | None) -> bool:
     if not value:
         return False
@@ -305,6 +315,14 @@ class AdminLoginRequest(BaseModel):
 
 class AdminUserStatusRequest(BaseModel):
     enabled: bool
+
+
+class AdminCreateUserRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    name: str = Field(default="", max_length=80)
+    account_expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    daily_limit_bytes: int = Field(default=DEFAULT_DAILY_QUOTA_BYTES, ge=0, le=10_000_000_000_000)
 
 
 class AdminQuotaRequest(BaseModel):
@@ -760,6 +778,42 @@ def admin_users(
     }
 
 
+@app.post("/v1/admin/users", status_code=status.HTTP_201_CREATED)
+def admin_create_user(
+    payload: AdminCreateUserRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    email = str(payload.email).lower()
+    name = payload.name.strip() or email.split("@", 1)[0]
+    user_id = secrets.token_hex(16)
+    created_at = iso(now())
+    expiry = account_expiry_value(payload.account_expires_at)
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO users(id, email, name, password_hash, created_at, account_expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, email, name, password_hasher.hash(payload.password), created_at, expiry),
+            )
+            ensure_user_quota(connection, user_id)
+            connection.execute(
+                "UPDATE user_quotas SET daily_limit_bytes = ?, updated_at = ? WHERE user_id = ?",
+                (payload.daily_limit_bytes, iso(now()), user_id),
+            )
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已经注册") from None
+    usage = user_usage(user_id)
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "created_at": row["created_at"],
+        "account_expires_at": account_expiry_date(row["account_expires_at"]),
+        "enabled": True,
+        "daily_quota_bytes": usage["quota_bytes"],
+    }
+
+
 @app.patch("/v1/admin/users/{user_id}/status")
 def admin_user_status(user_id: str, payload: AdminUserStatusRequest, admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
     with db() as connection:
@@ -780,10 +834,7 @@ def admin_user_expiry(
         user = connection.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-        expiry = None
-        if payload.account_expires_at:
-            expiry_date = datetime.strptime(payload.account_expires_at, "%Y-%m-%d").date()
-            expiry = iso(datetime.combine(expiry_date, datetime.max.time().replace(microsecond=0), tzinfo=quota_zone()))
+        expiry = account_expiry_value(payload.account_expires_at)
         connection.execute("UPDATE users SET account_expires_at = ? WHERE id = ?", (expiry, user_id))
         row = connection.execute("SELECT account_expires_at FROM users WHERE id = ?", (user_id,)).fetchone()
     return {"user_id": user_id, "account_expires_at": account_expiry_date(row["account_expires_at"])}
