@@ -50,6 +50,7 @@ interface AuthResponse {
 
 const SESSION_KEY = "goyou.auth.session";
 const LEGACY_SESSION_KEY = "proxyswitch.auth.session";
+const REMEMBERED_LOGIN_KEY = "goyou.login.remembered";
 export const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL || "https://proxy.123371.com"
 ).replace(/\/$/, "");
@@ -109,6 +110,34 @@ export function getSession(): AuthSession | null {
   } catch {
     return null;
   }
+}
+
+export interface RememberedLogin {
+  email: string;
+  password: string;
+}
+
+export function getRememberedLogin(): RememberedLogin | null {
+  try {
+    const value = localStorage.getItem(REMEMBERED_LOGIN_KEY);
+    if (!value) return null;
+    const remembered = JSON.parse(value) as Partial<RememberedLogin>;
+    if (!remembered.email || !remembered.password) return null;
+    return { email: remembered.email, password: remembered.password };
+  } catch {
+    return null;
+  }
+}
+
+export function saveRememberedLogin(email: string, password: string): void {
+  localStorage.setItem(
+    REMEMBERED_LOGIN_KEY,
+    JSON.stringify({ email: email.trim(), password }),
+  );
+}
+
+export function clearRememberedLogin(): void {
+  localStorage.removeItem(REMEMBERED_LOGIN_KEY);
 }
 
 export async function register(

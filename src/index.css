@@ -190,6 +190,24 @@ button:disabled {
   align-items: center;
   margin-top: -6px;
 }
+.remember-option {
+  display: inline-flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 7px;
+  color: #7b8997 !important;
+  cursor: pointer;
+  font-size: 12px !important;
+  font-weight: 520 !important;
+}
+.auth-form .remember-option input {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: #1768a7;
+}
 .text-button {
   color: #3479a9;
   background: transparent;

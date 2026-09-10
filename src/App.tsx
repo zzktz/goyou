@@ -3,11 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import appPackage from "../package.json";
 import {
+  clearRememberedLogin,
   getSession,
+  getRememberedLogin,
   getTodayUsage,
   login,
   logout,
   refreshSession,
+  saveRememberedLogin,
 } from "./auth";
 import type { AuthSession, UsageSummary } from "./auth";
 
@@ -69,8 +72,10 @@ function AuthPage({
 }: {
   onAuthenticated: (session: AuthSession) => void;
 }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const rememberedLogin = getRememberedLogin();
+  const [email, setEmail] = useState(rememberedLogin?.email ?? "");
+  const [password, setPassword] = useState(rememberedLogin?.password ?? "");
+  const [rememberLogin, setRememberLogin] = useState(rememberedLogin !== null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -89,6 +94,11 @@ function AuthPage({
     setBusy(true);
     try {
       const session = await login(normalizedEmail, password);
+      if (rememberLogin) {
+        saveRememberedLogin(normalizedEmail, password);
+      } else {
+        clearRememberedLogin();
+      }
       onAuthenticated(session);
     } catch (submissionError) {
       setError(
@@ -146,7 +156,14 @@ function AuthPage({
             />
           </label>
           <div className="form-row">
-            <span />
+            <label className="remember-option">
+              <input
+                checked={rememberLogin}
+                onChange={(event) => setRememberLogin(event.target.checked)}
+                type="checkbox"
+              />
+              <span>记住账号密码</span>
+            </label>
             <button
               className="text-button"
               type="button"
