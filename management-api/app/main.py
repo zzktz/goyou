@@ -600,7 +600,15 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
     for lease in leases:
         states[lease_state(lease)] += 1
     return {
-        "service": {"name": APP_NAME, "status": "ok", "relay_host": RELAY_HOST, "relay_port": RELAY_PORT, "relay_method": RELAY_METHOD},
+        "service": {
+            "name": APP_NAME,
+            "status": "ok",
+            "relay_host": RELAY_HOST,
+            "relay_port": RELAY_PORT,
+            "relay_port_start": RELAY_PORT_START,
+            "relay_port_end": RELAY_PORT_END,
+            "relay_method": RELAY_METHOD,
+        },
         "users": {"total": users["total"], "enabled": users["enabled"] or 0, "disabled": (users["total"] or 0) - (users["enabled"] or 0)},
         "leases": {"total": len(leases), **states},
         "active_refresh_tokens": refresh_tokens,
