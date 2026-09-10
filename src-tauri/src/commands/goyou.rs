@@ -241,6 +241,32 @@ fn alive(pid: u32) -> bool {
         })
         .unwrap_or(false)
 }
+
+#[cfg(windows)]
+fn process_command_line(pid: u32) -> Option<String> {
+    // `wmic` is no longer included on recent Windows installations. PowerShell
+    // and the CIM provider are available on supported Windows versions and let
+    // us identify a stale GoYou/ProxySwitch SSH tunnel without touching an
+    // unrelated process that happens to use the proxy port.
+    let query = format!(
+        "$p = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; if ($p) {{ $p.CommandLine }}"
+    );
+    hidden_command("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &query,
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|command| !command.is_empty())
+}
+
 #[cfg(unix)]
 fn matching_tunnel(pid: u32) -> bool {
     Command::new("ps")
@@ -297,9 +323,20 @@ fn matching_legacy_singbox(_pid: u32) -> bool {
     false
 }
 #[cfg(windows)]
-fn matching_tunnel(_pid: u32) -> bool {
-    false
+fn matching_tunnel(pid: u32) -> bool {
+    process_command_line(pid)
+        .map(|command| {
+            let command = command.to_ascii_lowercase();
+            command.contains("ssh")
+                && command.contains(&format!("{HOST}:{PORT}"))
+                && command.contains(&format!("{SSH_USER}@{SSH_HOST}"))
+                && command.contains(&SSH_PORT.to_string())
+                && (command.contains("goyou_tunnel=1") || command.contains("proxyswitch_tunnel=1"))
+        })
+        .unwrap_or(false)
 }
+
+#[cfg(unix)]
 fn discover_existing_tunnel() -> Option<u32> {
     Command::new("lsof")
         .args(["-nP", "-t", &format!("-iTCP:{PORT}"), "-sTCP:LISTEN"])
@@ -313,6 +350,28 @@ fn discover_existing_tunnel() -> Option<u32> {
                 .ok()
         })
         .filter(|pid| matching_tunnel(*pid))
+}
+
+#[cfg(windows)]
+fn discover_existing_tunnel() -> Option<u32> {
+    let output = hidden_command("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5
+                || !fields[0].eq_ignore_ascii_case("TCP")
+                || !fields[1].ends_with(&format!(":{PORT}"))
+                || !fields[3].eq_ignore_ascii_case("LISTENING")
+            {
+                return None;
+            }
+            fields[4].parse::<u32>().ok()
+        })
+        .find(|pid| matching_tunnel(*pid))
 }
 #[cfg(unix)]
 fn discover_existing_singbox() -> Option<u32> {
