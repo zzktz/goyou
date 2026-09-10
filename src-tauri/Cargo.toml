@@ -1,6 +1,6 @@
 [package]
 name = "goyou"
-version = "1.0.18"
+version = "1.0.19"
 description = "GoYou desktop proxy client"
 license = "MIT"
 repository = "https://github.com/zzktz/goyou"

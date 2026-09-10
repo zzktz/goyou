@@ -1,6 +1,6 @@
 mod auto_launch;
 mod commands;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 pub fn run() {
     tauri::Builder::default()
@@ -46,6 +46,14 @@ pub fn run() {
             commands::get_auto_launch_status,
             commands::set_goyou_git_proxy
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run GoYou");
+        .build(tauri::generate_context!())
+        .expect("failed to build GoYou")
+        .run(|_app, event| {
+            // Release the local proxy before the process exits. This is
+            // especially important on Windows, where a running sing-box.exe
+            // prevents the NSIS installer from replacing the bundled binary.
+            if matches!(event, RunEvent::ExitRequested { .. }) {
+                let _ = commands::disable_goyou();
+            }
+        });
 }
