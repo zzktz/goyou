@@ -10,6 +10,10 @@ const quotaOpen = ref(false)
 const quotaSaving = ref(false)
 const quotaUser = ref(null)
 const quotaMegabytes = ref(500)
+const expiryOpen = ref(false)
+const expirySaving = ref(false)
+const expiryUser = ref(null)
+const expiryDate = ref('')
 const filters = reactive({ keyword: '', state: undefined })
 const pagination = reactive({ current: 1, pageSize: 20, total: 0, showSizeChanger: true, showTotal: total => `共 ${total} 个用户` })
 
@@ -30,13 +34,29 @@ async function changeStatus(record, enabled) {
 }
 function formatBytes(value) {
   const bytes = Number(value || 0)
-  if (bytes < 1000000) return `${bytes} B`
-  return `${(bytes / 1000000).toFixed(bytes >= 1000000000 ? 1 : 0)} MB`
+  const megabytes = bytes / 1000000
+  const precision = megabytes < 1 ? 2 : megabytes < 10 || megabytes >= 1000 ? 1 : 0
+  return `${megabytes.toFixed(precision)} MB`
 }
 function openQuota(record) {
   quotaUser.value = record
   quotaMegabytes.value = Math.round(Number(record.daily_quota_bytes || 0) / 1000000)
   quotaOpen.value = true
+}
+function openExpiry(record) {
+  expiryUser.value = record
+  expiryDate.value = record.account_expires_at || ''
+  expiryOpen.value = true
+}
+async function saveExpiry() {
+  if (!expiryUser.value) return
+  expirySaving.value = true
+  try {
+    const { data } = await client.patch(`/v1/admin/users/${expiryUser.value.id}/expiry`, { account_expires_at: expiryDate.value || null })
+    expiryUser.value.account_expires_at = data.account_expires_at
+    expiryOpen.value = false
+    message.success(data.account_expires_at ? '账户到期时间已更新' : '账户已设置为长期有效')
+  } catch (error) { message.error(error.response?.data?.detail || '到期时间更新失败') } finally { expirySaving.value = false }
 }
 async function saveQuota() {
   if (!quotaUser.value || !Number.isFinite(Number(quotaMegabytes.value)) || Number(quotaMegabytes.value) < 0) return
@@ -57,7 +77,8 @@ onMounted(load)
   <div>
     <div class="page-title"><div><h1>用户管理</h1><p>查看注册用户、登录状态和租约使用情况。</p></div><a-button @click="load()">刷新</a-button></div>
     <a-card class="filter-card"><a-space wrap><a-input v-model:value="filters.keyword" allow-clear placeholder="邮箱、名称或用户 ID" style="width: 260px" @press-enter="search" /><a-select v-model:value="filters.state" allow-clear placeholder="全部状态" style="width: 140px"><a-select-option value="active">已启用</a-select-option><a-select-option value="disabled">已停用</a-select-option></a-select><a-button type="primary" @click="search">查询</a-button><a-button @click="reset">重置</a-button></a-space></a-card>
-    <a-card><a-table :data-source="rows" :loading="loading" :pagination="pagination" row-key="id" @change="changePage"><a-table-column title="用户" key="user" :width="250"><template #default="{ record }"><div class="user-cell"><a-avatar size="small">{{ record.name?.slice(0, 1) }}</a-avatar><div><strong>{{ record.name }}</strong><span>{{ record.email }}</span></div></div></template></a-table-column><a-table-column title="用户 ID" data-index="id" ellipsis /><a-table-column title="今日流量" key="usage" :width="170"><template #default="{ record }"><span :class="{ 'quota-exceeded': record.quota_exceeded }">{{ formatBytes(record.used_bytes) }} / {{ formatBytes(record.daily_quota_bytes) }}</span></template></a-table-column><a-table-column title="租约数" data-index="lease_count" :width="90" /><a-table-column title="注册时间" key="created_at" :width="190"><template #default="{ record }">{{ formatDate(record.created_at) }}</template></a-table-column><a-table-column title="状态" key="status" :width="120"><template #default="{ record }"><a-switch :checked="record.enabled" :loading="updatingId === record.id" checked-children="启用" un-checked-children="停用" @change="changeStatus(record, $event)" /></template></a-table-column><a-table-column title="操作" key="action" :width="110"><template #default="{ record }"><a-button type="link" @click="openQuota(record)">设置额度</a-button></template></a-table-column></a-table></a-card>
+    <a-card><a-table :data-source="rows" :loading="loading" :pagination="pagination" row-key="id" @change="changePage"><a-table-column title="用户" key="user" :width="250"><template #default="{ record }"><div class="user-cell"><a-avatar size="small">{{ record.name?.slice(0, 1) }}</a-avatar><div><strong>{{ record.name }}</strong><span>{{ record.email }}</span></div></div></template></a-table-column><a-table-column title="用户 ID" data-index="id" ellipsis /><a-table-column title="今日流量" key="usage" :width="170"><template #default="{ record }"><span :class="{ 'quota-exceeded': record.quota_exceeded }">{{ formatBytes(record.used_bytes) }} / {{ formatBytes(record.daily_quota_bytes) }}</span></template></a-table-column><a-table-column title="到期时间" key="account_expires_at" :width="130"><template #default="{ record }">{{ record.account_expires_at || '长期有效' }}</template></a-table-column><a-table-column title="租约数" data-index="lease_count" :width="90" /><a-table-column title="注册时间" key="created_at" :width="190"><template #default="{ record }">{{ formatDate(record.created_at) }}</template></a-table-column><a-table-column title="状态" key="status" :width="120"><template #default="{ record }"><a-switch :checked="record.enabled" :loading="updatingId === record.id" checked-children="启用" un-checked-children="停用" @change="changeStatus(record, $event)" /></template></a-table-column><a-table-column title="操作" key="action" :width="180"><template #default="{ record }"><a-button type="link" @click="openQuota(record)">设置额度</a-button><a-button type="link" @click="openExpiry(record)">设置到期</a-button></template></a-table-column></a-table></a-card>
     <a-modal v-model:open="quotaOpen" title="设置每日流量额度" :confirm-loading="quotaSaving" ok-text="保存" cancel-text="取消" @ok="saveQuota"><p v-if="quotaUser">用户：{{ quotaUser.email }}</p><a-form-item label="每日额度"><a-input-number v-model:value="quotaMegabytes" :min="0" :max="10000000" :precision="0" addon-after="MB" style="width: 100%" /></a-form-item><p class="muted">当前已使用：{{ formatBytes(quotaUser?.used_bytes) }}。设置为 0 MB 将禁止当天代理流量。</p></a-modal>
+    <a-modal v-model:open="expiryOpen" title="设置账户到期时间" :confirm-loading="expirySaving" ok-text="保存" cancel-text="取消" @ok="saveExpiry"><p v-if="expiryUser">用户：{{ expiryUser.email }}</p><a-form-item label="到期日期"><a-input v-model:value="expiryDate" type="date" /></a-form-item><p class="muted">到期日期当天仍可使用代理；留空表示长期有效。到期后用户仍可登录，但不能开启代理。</p></a-modal>
   </div>
 </template>

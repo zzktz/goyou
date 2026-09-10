@@ -35,6 +35,7 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/users/{user_id}/usage`
 - `GET /v1/admin/usage`
 - `POST /v1/internal/usage/report` (trusted relay metering adapter)
+- `GET /v1/admin/traffic-logs` (管理员查看连接级流量、目标域名和端口)
 - `GET /v1/internal/relay/leases` (trusted relay configuration sync)
 - `GET /healthz`
 

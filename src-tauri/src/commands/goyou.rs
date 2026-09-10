@@ -21,6 +21,7 @@ const SSH_PORT: u16 = 12581;
 const SSH_USER: &str = "root";
 const SSH_KNOWN_HOSTS_FILE: &str = "known_hosts";
 const GIT_PROXY: &str = "socks5h://127.0.0.1:7890";
+const CONTROL_PLANE_URL: &str = "https://proxy.123371.com";
 
 // A manual stop cancels any in-flight proxy operation.
 static MANUAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -495,7 +496,10 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
         .arg(&config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        // The proxy stays detached after startup; keeping a stderr pipe here
+        // would close the reader when this function returns and can terminate
+        // sing-box on its next warning write.
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -520,15 +524,7 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
             .map_err(|e| format!("检查 sing-box 状态失败: {e}"))?
             .is_some()
         {
-            let output = child
-                .wait_with_output()
-                .map_err(|e| format!("读取 sing-box 错误信息失败: {e}"))?;
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if detail.is_empty() {
-                "sing-box 启动失败，请检查租约和本地配置。".into()
-            } else {
-                format!("sing-box 启动失败：{detail}")
-            });
+            return Err("sing-box 启动失败，请检查租约和本地配置。".into());
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -979,4 +975,90 @@ pub async fn diagnose_goyou() -> Diagnostic {
         git_proxy_matches_tunnel: matches,
         error,
     }
+}
+
+#[tauri::command]
+pub async fn get_goyou_usage(access_token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .user_agent("GoYou/1.0")
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("无法创建管理服务器请求：{error}"))?;
+    let response = client
+        .get(format!("{CONTROL_PLANE_URL}/v1/usage/today"))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|error| format!("无法连接管理服务器，请检查网络或稍后重试：{error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取管理服务器响应失败：{error}"))?;
+    let value = serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|error| format!("管理服务器返回数据无效：{error}"))?;
+    if !status.is_success() {
+        let detail = value
+            .get("detail")
+            .map(|detail| detail.to_string())
+            .unwrap_or_else(|| status.to_string());
+        return Err(format!(
+            "管理服务器返回错误（{}）：{detail}",
+            status.as_u16()
+        ));
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+pub async fn control_request(
+    path: String,
+    method: String,
+    body: Option<serde_json::Value>,
+    access_token: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .user_agent("GoYou/1.0")
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("无法创建管理服务器请求：{error}"))?;
+    let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+        .map_err(|error| format!("无效的管理请求方法：{error}"))?;
+    let mut request = client.request(method, format!("{CONTROL_PLANE_URL}{path}"));
+    if let Some(token) = access_token.filter(|token| !token.trim().is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request.header("content-type", "application/json").body(
+            serde_json::to_vec(&body).map_err(|error| format!("序列化管理请求失败：{error}"))?,
+        );
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("无法连接管理服务器，请检查网络或稍后重试：{error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取管理服务器响应失败：{error}"))?;
+    let value = if body.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str::<serde_json::Value>(&body)
+            .map_err(|error| format!("管理服务器返回数据无效：{error}"))?
+    };
+    if !status.is_success() {
+        let detail = value
+            .get("detail")
+            .map(|detail| detail.to_string())
+            .unwrap_or_else(|| status.to_string());
+        return Err(format!(
+            "管理服务器返回错误（{}）：{detail}",
+            status.as_u16()
+        ));
+    }
+    Ok(value)
 }

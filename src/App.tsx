@@ -30,6 +30,40 @@ interface Diagnostic {
   error: string | null;
 }
 
+function isAuthFailure(error: unknown): boolean {
+  return error instanceof Error && /登录|令牌|401/.test(error.message);
+}
+
+function isAccountExpiredError(error: unknown): boolean {
+  return error instanceof Error && /账户已到期/.test(error.message);
+}
+
+function isAccountExpired(expiryDate: string | null | undefined): boolean {
+  if (!expiryDate) return false;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })
+    .formatToParts(new Date())
+    .reduce<Record<string, string>>((values, part) => {
+      if (part.type !== "literal") values[part.type] = part.value;
+      return values;
+    }, {});
+  const today = `${parts.year}-${parts.month}-${parts.day}`;
+  return expiryDate < today;
+}
+
+function formatAccountExpiry(expiryDate: string | null | undefined): string {
+  if (!expiryDate) return "长期有效";
+  return new Date(`${expiryDate}T12:00:00`).toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
 function AuthPage({
   onAuthenticated,
 }: {
@@ -153,21 +187,114 @@ function Dashboard({
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [message, setMessage] = useState("尚未检测网络连通性");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
   const autoClosedDate = useRef<string | null>(null);
+  const startupRefreshDone = useRef(false);
+  const authFailureHandled = useRef(false);
+  const accountExpiryHandled = useRef(false);
+  const currentSession = useRef(session);
+  const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
 
-  const refresh = useCallback(async () => {
-    const [next, launch] = await Promise.all([
-      invoke<Status>("get_goyou_status"),
-      invoke<boolean>("get_auto_launch_status"),
-    ]);
-    setStatus(next);
-    setAutoLaunch(launch);
-    try {
-      setUsage(await getTodayUsage(session));
-    } catch {
-      // Usage reporting is optional while the control plane is unavailable.
-    }
+  useEffect(() => {
+    currentSession.current = session;
   }, [session]);
+
+  const refreshAuthenticatedSession = useCallback(
+    (activeSession: AuthSession = currentSession.current) => {
+      if (sessionRefreshInFlight.current) {
+        return sessionRefreshInFlight.current;
+      }
+      const request = refreshSession(activeSession)
+        .then((nextSession) => {
+          currentSession.current = nextSession;
+          return nextSession;
+        })
+        .finally(() => {
+          if (sessionRefreshInFlight.current === request) {
+            sessionRefreshInFlight.current = null;
+          }
+        });
+      sessionRefreshInFlight.current = request;
+      return request;
+    },
+    [],
+  );
+
+  const handleAuthFailure = useCallback(async () => {
+    if (authFailureHandled.current) return;
+    authFailureHandled.current = true;
+    await invoke("disable_goyou").catch(() => undefined);
+    onLogout();
+  }, [onLogout]);
+
+  const handleAccountExpired = useCallback(async () => {
+    if (!accountExpiryHandled.current) {
+      accountExpiryHandled.current = true;
+      await invoke("disable_goyou").catch(() => undefined);
+      await invoke<Status>("get_goyou_status")
+        .then(setStatus)
+        .catch(() => undefined);
+    }
+    setMessage("您的账户已到期，不可继续使用代理。");
+  }, []);
+
+  const refresh = useCallback(
+    async (activeSession: AuthSession = session) => {
+      const [next, launch] = await Promise.all([
+        invoke<Status>("get_goyou_status"),
+        invoke<boolean>("get_auto_launch_status"),
+      ]);
+      setStatus(next);
+      setAutoLaunch(launch);
+      if (isAccountExpired(activeSession.user.account_expires_at)) {
+        await handleAccountExpired();
+      }
+      try {
+        const latestUsage = await getTodayUsage(activeSession);
+        setUsage(latestUsage);
+        setUsageError(null);
+        if (latestUsage.account_expired) {
+          await handleAccountExpired();
+        }
+      } catch (error) {
+        if (isAuthFailure(error)) {
+          try {
+            const renewedSession =
+              await refreshAuthenticatedSession(activeSession);
+            onSessionRefreshed(renewedSession);
+            if (isAccountExpired(renewedSession.user.account_expires_at)) {
+              await handleAccountExpired();
+            }
+            const latestUsage = await getTodayUsage(renewedSession);
+            setUsage(latestUsage);
+            setUsageError(null);
+            if (latestUsage.account_expired) {
+              await handleAccountExpired();
+            }
+            return;
+          } catch (renewalError) {
+            setUsage(null);
+            setUsageError("今日流量暂不可用，请重新登录后查看");
+            if (isAccountExpiredError(renewalError)) {
+              await handleAccountExpired();
+            } else if (isAuthFailure(renewalError)) {
+              void handleAuthFailure();
+            }
+            return;
+          }
+        }
+        setUsage(null);
+        setUsageError("今日流量暂时不可用");
+      }
+    },
+    [
+      handleAccountExpired,
+      handleAuthFailure,
+      onSessionRefreshed,
+      refreshAuthenticatedSession,
+      session,
+    ],
+  );
 
   useEffect(() => {
     void refresh();
@@ -176,30 +303,121 @@ function Dashboard({
   }, [refresh]);
 
   useEffect(() => {
+    if (startupRefreshDone.current) return;
+    startupRefreshDone.current = true;
+    let cancelled = false;
+    void invoke<Status>("get_goyou_status")
+      .then(async (nextStatus) => {
+        if (nextStatus.systemProxyEnabled && !nextStatus.tunnelRunning) {
+          await invoke("disable_goyou");
+        }
+        return refreshAuthenticatedSession();
+      })
+      .then(async (nextSession) => {
+        if (cancelled) return;
+        onSessionRefreshed(nextSession);
+        if (isAccountExpired(nextSession.user.account_expires_at)) {
+          await handleAccountExpired();
+        }
+        return refresh(nextSession);
+      })
+      .catch((error) => {
+        if (isAccountExpiredError(error)) void handleAccountExpired();
+        else if (isAuthFailure(error)) void handleAuthFailure();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    handleAccountExpired,
+    handleAuthFailure,
+    onSessionRefreshed,
+    refresh,
+    refreshAuthenticatedSession,
+  ]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
-      void refreshSession(session)
+      void refreshAuthenticatedSession()
         .then((nextSession) => {
           onSessionRefreshed(nextSession);
+          if (isAccountExpired(nextSession.user.account_expires_at)) {
+            return handleAccountExpired();
+          }
           setMessage("登录令牌和代理租约已刷新");
         })
-        .catch((error) => setMessage(String(error)));
+        .catch((error) => {
+          if (isAccountExpiredError(error)) {
+            void handleAccountExpired();
+          } else if (isAuthFailure(error)) {
+            void handleAuthFailure();
+          } else {
+            setMessage("登录状态暂时无法刷新，请稍后重试");
+          }
+        });
     }, 10 * 60_000);
     return () => window.clearInterval(timer);
-  }, [onSessionRefreshed, session]);
+  }, [
+    handleAccountExpired,
+    handleAuthFailure,
+    onSessionRefreshed,
+    refreshAuthenticatedSession,
+  ]);
+
+  useEffect(() => {
+    if (isAccountExpired(session.user.account_expires_at)) {
+      void handleAccountExpired();
+    } else {
+      accountExpiryHandled.current = false;
+    }
+  }, [handleAccountExpired, session.user.account_expires_at]);
 
   const enable = async () => {
     if (!status) return;
+    if (isAccountExpired(session.user.account_expires_at)) {
+      await handleAccountExpired();
+      return;
+    }
     if (usage?.exceeded) {
       setMessage("今日流量额度已用尽，代理将在明日 00:00 后恢复");
       return;
     }
     setBusy(true);
     setBusyAction("enable");
+    setMessage("正在检查登录状态和流量额度…");
     try {
-      await invoke("enable_goyou", { lease: session.lease });
-      await refresh();
+      const activeSession = await refreshAuthenticatedSession();
+      onSessionRefreshed(activeSession);
+      if (isAccountExpired(activeSession.user.account_expires_at)) {
+        await handleAccountExpired();
+        return;
+      }
+      if (!activeSession.lease) {
+        setMessage("代理租约暂不可用，请稍后重试");
+        return;
+      }
+      const latestUsage = await getTodayUsage(activeSession);
+      setUsage(latestUsage);
+      setUsageError(null);
+      if (latestUsage.account_expired) {
+        await handleAccountExpired();
+        return;
+      }
+      if (latestUsage.exceeded) {
+        setMessage("今日流量额度已用尽，代理将在明日 00:00 后恢复");
+        return;
+      }
+      await invoke("enable_goyou", { lease: activeSession.lease });
+      await refresh(activeSession);
+      setMessage("代理已开启");
     } catch (error) {
-      setMessage(String(error));
+      if (isAccountExpiredError(error)) {
+        await handleAccountExpired();
+      } else if (isAuthFailure(error)) {
+        await handleAuthFailure();
+      } else {
+        setMessage(String(error));
+      }
     } finally {
       setBusy(false);
       setBusyAction(null);
@@ -208,9 +426,11 @@ function Dashboard({
   const disable = async () => {
     setBusy(true);
     setBusyAction("disable");
+    setMessage("正在关闭代理…");
     try {
       await invoke("disable_goyou");
       await refresh();
+      setMessage("代理已关闭");
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -249,10 +469,13 @@ function Dashboard({
         : result.gitProxyConfigured
           ? "Git 使用其他代理"
           : "Git 未配置全局代理";
+      const diagnosticError = result.error?.includes("proxy")
+        ? "代理上游节点不可达，请稍后重试"
+        : result.error;
       setMessage(
         result.githubReachable
           ? `${reachability}；耗时 ${result.latencyMs} ms；${gitProxyStatus}`
-          : `${reachability}；${result.error ?? "网络不可达"}`,
+          : `${reachability}；${diagnosticError ?? "网络不可达"}`,
       );
     } catch (error) {
       setMessage(String(error));
@@ -273,9 +496,16 @@ function Dashboard({
     }
   };
   const formatBytes = (bytes: number) => {
-    if (bytes < 1000000) return `${bytes} B`;
-    return `${(bytes / 1000000).toFixed(bytes >= 1000000000 ? 1 : 0)} MB`;
+    const megabytes = bytes / 1000000;
+    const precision =
+      megabytes < 1 ? 2 : megabytes < 10 || megabytes >= 1000 ? 1 : 0;
+    return `${megabytes.toFixed(precision)} MB`;
   };
+  const usagePercentage = usage
+    ? Math.max(0, Math.min(usage.percentage, 100))
+    : 0;
+  const usageWarning =
+    usage !== null && !usage.exceeded && usage.percentage >= 80;
   const confirmLogout = async () => {
     setBusy(true);
     setBusyAction("disable");
@@ -290,20 +520,29 @@ function Dashboard({
     }
   };
   const on = status?.state === "on";
-  const stateLabel = !status
-    ? "读取中"
-    : on
-      ? "代理已开启"
-      : status.state === "error"
-        ? "代理异常"
-        : "代理已关闭";
-  const stateTone = !status
+  const displayedMessage =
+    message === "尚未检测网络连通性" ? (status?.lastError ?? message) : message;
+  const proxyStatusTone = !status
     ? "pending"
-    : on
-      ? "running"
-      : status.state === "error"
-        ? "error"
+    : status.state === "error" || status.lastError
+      ? "error"
+      : status.state === "on"
+        ? "running"
         : "stopped";
+  const proxyStatusLabel =
+    proxyStatusTone === "pending"
+      ? "读取中"
+      : proxyStatusTone === "running"
+        ? "正常"
+        : proxyStatusTone === "error"
+          ? "异常"
+          : "未开启";
+  const detailStatusTone = (active: boolean) =>
+    active
+      ? "is-active"
+      : status?.state === "error" || status?.lastError
+        ? "is-error"
+        : "is-inactive";
 
   return (
     <main className="dashboard-shell">
@@ -320,9 +559,8 @@ function Dashboard({
                 <span />
               </div>
               <h1>GoYou</h1>
-              <span className={`overall-status ${stateTone}`}>
-                <i />
-                {stateLabel}
+              <span className="brand-version dashboard-version">
+                v{appPackage.version}
               </span>
             </div>
           </div>
@@ -346,12 +584,7 @@ function Dashboard({
               </button>
             </div>
             <p className="lease-summary">
-              有效期至{" "}
-              {new Date(session.lease.expires_at).toLocaleDateString("zh-CN", {
-                year: "numeric",
-                month: "long",
-                day: "numeric",
-              })}
+              有效期至 {formatAccountExpiry(session.user.account_expires_at)}
             </p>
           </div>
         </header>
@@ -382,42 +615,74 @@ function Dashboard({
           </button>
         </div>
         <dl>
-          <div>
-            <dt>本地 SOCKS</dt>
-            <dd>127.0.0.1:7890</dd>
+          <div
+            aria-live="polite"
+            className={`traffic-card traffic-grid-card ${usage?.exceeded ? "exceeded" : usageWarning ? "warning" : ""}`}
+            role="status"
+          >
+            <div className="traffic-card-header">
+              <span>今日流量</span>
+              <strong>
+                {usage
+                  ? `${formatBytes(usage.used_bytes)} / ${formatBytes(usage.quota_bytes)}`
+                  : "读取中"}
+              </strong>
+            </div>
+            <div className="traffic-progress" aria-hidden="true">
+              <span style={{ width: `${usagePercentage}%` }} />
+            </div>
+            <small className={usageWarning ? "traffic-alert" : undefined}>
+              {usage?.exceeded
+                ? "今日额度已用尽，代理已关闭"
+                : usageWarning
+                  ? `已使用 ${usage.percentage.toFixed(0)}%，请注意流量；剩余 ${formatBytes(usage.remaining_bytes)}，${new Date(usage.resets_at).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })} 重置`
+                  : usage
+                    ? `剩余 ${formatBytes(usage.remaining_bytes)}，${new Date(usage.resets_at).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })} 重置`
+                    : (usageError ?? "正在读取今日流量")}
+            </small>
           </div>
-          <div>
-            <dt>代理进程</dt>
-            <dd
-              className={
-                status?.tunnelRunning ? "state running" : "state stopped"
-              }
-            >
-              <i />
-              {status?.tunnelRunning ? "运行中" : "未运行"}
-            </dd>
-          </div>
-          <div>
-            <dt>本地端口</dt>
-            <dd
-              className={
-                status?.portListening ? "state running" : "state stopped"
-              }
-            >
-              <i />
-              {status?.portListening ? "正在监听" : "未监听"}
-            </dd>
-          </div>
-          <div>
-            <dt>系统代理</dt>
-            <dd
-              className={
-                status?.systemProxyEnabled ? "state running" : "state stopped"
-              }
-            >
-              <i />
-              {status?.systemProxyEnabled ? "已启用" : "未启用"}
-            </dd>
+          <div className="proxy-status-card">
+            <div className="proxy-status-heading">
+              <div className="proxy-status-title">代理状态</div>
+              <span
+                aria-label={`代理状态：${proxyStatusLabel}`}
+                className={`proxy-status-indicator ${proxyStatusTone}`}
+                data-tooltip={`代理状态：${proxyStatusLabel}`}
+                role="img"
+                tabIndex={0}
+              >
+                <i />
+                {proxyStatusLabel}
+              </span>
+            </div>
+            {(status?.state === "on" || status?.state === "error") && (
+              <div className="proxy-status-items">
+                <div className="proxy-status-item">
+                  <span className="proxy-status-label">代理进程:</span>
+                  <span
+                    className={`proxy-status-value ${detailStatusTone(status.tunnelRunning)}`}
+                  >
+                    {status.tunnelRunning ? "运行中" : "未运行"}
+                  </span>
+                </div>
+                <div className="proxy-status-item">
+                  <span className="proxy-status-label">本地端口:</span>
+                  <span
+                    className={`proxy-status-value ${detailStatusTone(status.portListening)}`}
+                  >
+                    {status.portListening ? "正在监听" : "未监听"}
+                  </span>
+                </div>
+                <div className="proxy-status-item">
+                  <span className="proxy-status-label">系统代理:</span>
+                  <span
+                    className={`proxy-status-value ${detailStatusTone(status.systemProxyEnabled)}`}
+                  >
+                    {status.systemProxyEnabled ? "已启用" : "未启用"}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </dl>
         <div className="settings-row">
@@ -444,29 +709,9 @@ function Dashboard({
             Git使用代理
           </label>
         </div>
-        {usage && (
-          <div className={`traffic-card ${usage.exceeded ? "exceeded" : ""}`}>
-            <div className="traffic-card-header">
-              <span>今日流量</span>
-              <strong>
-                {formatBytes(usage.used_bytes)} /{" "}
-                {formatBytes(usage.quota_bytes)}
-              </strong>
-            </div>
-            <div className="traffic-progress" aria-hidden="true">
-              <span style={{ width: `${Math.min(usage.percentage, 100)}%` }} />
-            </div>
-            <small>
-              {usage.exceeded
-                ? "今日额度已用尽，代理已关闭"
-                : `剩余 ${formatBytes(usage.remaining_bytes)}，${new Date(usage.resets_at).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })} 重置`}
-            </small>
-          </div>
-        )}
         <p className={`message ${status?.lastError ? "error" : ""}`}>
-          {status?.lastError ?? message}
+          {displayedMessage}
         </p>
-        <small className="app-version">v{appPackage.version}</small>
       </section>
       {showLogoutConfirm && (
         <div className="modal-backdrop" role="presentation">

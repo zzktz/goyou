@@ -40,6 +40,7 @@ RELAY_PORT_END = int(os.getenv("RELAY_PORT_END", "39999"))
 RELAY_METHOD = os.getenv("RELAY_METHOD", "chacha20-ietf-poly1305")
 RELAY_PASSWORD = os.getenv("RELAY_PASSWORD", "")
 DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "500000000"))
+DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
 METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
@@ -68,11 +69,44 @@ def usage_date(value: datetime | None = None) -> str:
     return (value or now()).astimezone(quota_zone()).date().isoformat()
 
 
+def usage_day_bounds(target_date: str) -> tuple[str, str]:
+    day = datetime.strptime(target_date, "%Y-%m-%d").date()
+    zone = quota_zone()
+    start = datetime.combine(day, datetime.min.time(), tzinfo=zone)
+    end = start + timedelta(days=1)
+    return iso(start), iso(end)
+
+
 def next_reset_at() -> str:
     local_now = now().astimezone(quota_zone())
     next_day = local_now.date() + timedelta(days=1)
     reset = datetime.combine(next_day, datetime.min.time(), tzinfo=quota_zone())
     return reset.isoformat()
+
+
+def default_account_expires_at(created_at: datetime) -> str:
+    local_created = created_at.astimezone(quota_zone())
+    expiry_date = local_created.date() + timedelta(days=DEFAULT_ACCOUNT_VALID_DAYS)
+    expiry = datetime.combine(expiry_date, datetime.max.time().replace(microsecond=0), tzinfo=quota_zone())
+    return iso(expiry)
+
+
+def account_expiry_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).astimezone(quota_zone()).date().isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def account_is_expired(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        return datetime.fromisoformat(value) <= now()
+    except (TypeError, ValueError):
+        return True
 
 
 def db() -> sqlite3.Connection:
@@ -158,7 +192,8 @@ def init_db() -> None:
                 name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                disabled INTEGER NOT NULL DEFAULT 0
+                disabled INTEGER NOT NULL DEFAULT 0,
+                account_expires_at TEXT
             );
             CREATE TABLE IF NOT EXISTS refresh_tokens (
                 token_hash TEXT PRIMARY KEY,
@@ -196,16 +231,43 @@ def init_db() -> None:
                 report_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 lease_id TEXT,
+                connection_id TEXT,
+                target_host TEXT,
+                target_port INTEGER,
                 upload_bytes INTEGER NOT NULL,
                 download_bytes INTEGER NOT NULL,
                 reported_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
+            CREATE INDEX IF NOT EXISTS idx_usage_reports_reported_at ON usage_reports(reported_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_reports_user_id ON usage_reports(user_id);
             """
         )
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
         if "relay_port" not in lease_columns:
             connection.execute("ALTER TABLE leases ADD COLUMN relay_port INTEGER")
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        added_expiry_column = "account_expires_at" not in user_columns
+        if added_expiry_column:
+            connection.execute("ALTER TABLE users ADD COLUMN account_expires_at TEXT")
+            users_without_expiry = connection.execute(
+                "SELECT id, created_at FROM users WHERE account_expires_at IS NULL"
+            ).fetchall()
+            for user in users_without_expiry:
+                try:
+                    created_at = datetime.fromisoformat(user["created_at"])
+                    expiry = default_account_expires_at(created_at)
+                except (TypeError, ValueError):
+                    expiry = default_account_expires_at(now())
+                connection.execute("UPDATE users SET account_expires_at = ? WHERE id = ?", (expiry, user["id"]))
+        usage_report_columns = {row[1] for row in connection.execute("PRAGMA table_info(usage_reports)").fetchall()}
+        for column, definition in (
+            ("connection_id", "TEXT"),
+            ("target_host", "TEXT"),
+            ("target_port", "INTEGER"),
+        ):
+            if column not in usage_report_columns:
+                connection.execute(f"ALTER TABLE usage_reports ADD COLUMN {column} {definition}")
 
 
 class RegisterRequest(BaseModel):
@@ -249,16 +311,29 @@ class AdminQuotaRequest(BaseModel):
     daily_limit_bytes: int = Field(ge=0, le=10_000_000_000_000)
 
 
+class AdminAccountExpiryRequest(BaseModel):
+    account_expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
 class UsageReportRequest(BaseModel):
     report_id: str = Field(min_length=8, max_length=200)
     user_id: str = Field(min_length=1, max_length=100)
     lease_id: str | None = Field(default=None, max_length=100)
+    connection_id: str | None = Field(default=None, max_length=200)
+    target_host: str | None = Field(default=None, max_length=255)
+    target_port: int | None = Field(default=None, ge=1, le=65535)
     upload_bytes: int = Field(default=0, ge=0, le=10_000_000_000_000)
     download_bytes: int = Field(default=0, ge=0, le=10_000_000_000_000)
 
 
 def public_user(row: sqlite3.Row) -> dict[str, str]:
-    return {"id": row["id"], "email": row["email"], "name": row["name"], "created_at": row["created_at"]}
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "created_at": row["created_at"],
+        "account_expires_at": account_expiry_date(row["account_expires_at"]),
+    }
 
 
 def access_token(user_id: str) -> str:
@@ -356,7 +431,10 @@ def register(payload: RegisterRequest) -> dict:
     created_at = iso(now())
     try:
         with db() as connection:
-            connection.execute("INSERT INTO users(id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)", (user_id, email, name, password_hasher.hash(payload.password), created_at))
+            connection.execute(
+                "INSERT INTO users(id, email, name, password_hash, created_at, account_expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, email, name, password_hasher.hash(payload.password), created_at, default_account_expires_at(datetime.fromisoformat(created_at))),
+            )
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已经注册，请直接登录") from None
@@ -401,7 +479,10 @@ def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
 
 @app.get("/v1/usage/today")
 def today_usage(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
-    return user_usage(user["id"])
+    payload = user_usage(user["id"])
+    payload["account_expires_at"] = account_expiry_date(user["account_expires_at"])
+    payload["account_expired"] = account_is_expired(user["account_expires_at"])
+    return payload
 
 
 @app.post("/v1/devices/register")
@@ -411,6 +492,8 @@ def register_device(payload: DeviceRequest, user: Annotated[sqlite3.Row, Depends
 
 @app.post("/v1/proxy/lease")
 def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
+    if account_is_expired(user["account_expires_at"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已到期，不可继续使用代理。")
     lease_id = secrets.token_hex(16)
     expires = now() + timedelta(hours=1)
     username, password = new_relay_credentials(lease_id)
@@ -435,6 +518,8 @@ def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(cur
 
 @app.post("/v1/proxy/lease/refresh")
 def refresh_lease(payload: LeaseRefreshRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
+    if account_is_expired(user["account_expires_at"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已到期，不可继续使用代理。")
     expires = now() + timedelta(hours=1)
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -485,11 +570,17 @@ def report_usage(
         if payload.upload_bytes == 0 and payload.download_bytes == 0:
             return usage_payload(connection, payload.user_id)
         report = connection.execute(
-            "INSERT OR IGNORE INTO usage_reports(report_id, user_id, lease_id, upload_bytes, download_bytes, reported_at) VALUES (?, ?, ?, ?, ?, ?)",
+            """INSERT OR IGNORE INTO usage_reports(
+                   report_id, user_id, lease_id, connection_id, target_host, target_port,
+                   upload_bytes, download_bytes, reported_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 payload.report_id,
                 payload.user_id,
                 payload.lease_id,
+                payload.connection_id,
+                payload.target_host.strip() if payload.target_host else None,
+                payload.target_port,
                 payload.upload_bytes,
                 payload.download_bytes,
                 iso(now()),
@@ -531,9 +622,10 @@ def relay_leases(
                LEFT JOIN user_quotas q ON q.user_id = l.user_id
                LEFT JOIN daily_usage d ON d.user_id = l.user_id AND d.usage_date = ?
                WHERE l.revoked_at IS NULL AND l.expires_at > ? AND u.disabled = 0
+                 AND (u.account_expires_at IS NULL OR u.account_expires_at > ?)
                  AND l.relay_port IS NOT NULL AND l.username != 'relay'
                  AND (d.total_bytes IS NULL OR d.total_bytes < COALESCE(q.daily_limit_bytes, ?))""",
-            (usage_date(), iso(now()), DEFAULT_DAILY_QUOTA_BYTES),
+            (usage_date(), iso(now()), iso(now()), DEFAULT_DAILY_QUOTA_BYTES),
         ).fetchall()
     return {
         "generated_at": iso(now()),
@@ -639,7 +731,7 @@ def admin_users(
     with db() as connection:
         total = connection.execute(f"SELECT COUNT(*) FROM users u WHERE {where}", params).fetchone()[0]
         rows = connection.execute(
-            f"""SELECT u.id, u.email, u.name, u.created_at, u.disabled, COUNT(l.id) AS lease_count
+            f"""SELECT u.id, u.email, u.name, u.created_at, u.disabled, u.account_expires_at, COUNT(l.id) AS lease_count
                 FROM users u LEFT JOIN leases l ON l.user_id = u.id
                 WHERE {where}
                 GROUP BY u.id ORDER BY u.created_at DESC LIMIT ? OFFSET ?""",
@@ -654,6 +746,7 @@ def admin_users(
                 "email": row["email"],
                 "name": row["name"],
                 "created_at": row["created_at"],
+                "account_expires_at": account_expiry_date(row["account_expires_at"]),
                 "enabled": not bool(row["disabled"]),
                 "lease_count": row["lease_count"],
                 "daily_quota_bytes": usage["quota_bytes"],
@@ -673,8 +766,27 @@ def admin_user_status(user_id: str, payload: AdminUserStatusRequest, admin: Anno
         cursor = connection.execute("UPDATE users SET disabled = ? WHERE id = ?", (0 if payload.enabled else 1, user_id))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-        row = connection.execute("SELECT id, email, name, created_at, disabled FROM users WHERE id = ?", (user_id,)).fetchone()
-    return {"id": row["id"], "email": row["email"], "name": row["name"], "created_at": row["created_at"], "enabled": not bool(row["disabled"])}
+        row = connection.execute("SELECT id, email, name, created_at, disabled, account_expires_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"id": row["id"], "email": row["email"], "name": row["name"], "created_at": row["created_at"], "account_expires_at": account_expiry_date(row["account_expires_at"]), "enabled": not bool(row["disabled"])}
+
+
+@app.patch("/v1/admin/users/{user_id}/expiry")
+def admin_user_expiry(
+    user_id: str,
+    payload: AdminAccountExpiryRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    with db() as connection:
+        user = connection.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+        expiry = None
+        if payload.account_expires_at:
+            expiry_date = datetime.strptime(payload.account_expires_at, "%Y-%m-%d").date()
+            expiry = iso(datetime.combine(expiry_date, datetime.max.time().replace(microsecond=0), tzinfo=quota_zone()))
+        connection.execute("UPDATE users SET account_expires_at = ? WHERE id = ?", (expiry, user_id))
+        row = connection.execute("SELECT account_expires_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    return {"user_id": user_id, "account_expires_at": account_expiry_date(row["account_expires_at"])}
 
 
 @app.patch("/v1/admin/users/{user_id}/quota")
@@ -743,6 +855,56 @@ def admin_usage(
                JOIN user_quotas q ON q.user_id = d.user_id
                WHERE d.usage_date = ? ORDER BY d.total_bytes DESC LIMIT ? OFFSET ?""",
             (target_date, page_size, offset),
+        ).fetchall()
+    return {
+        "date": target_date,
+        "items": [dict(row) for row in rows],
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+    }
+
+
+@app.get("/v1/admin/traffic-logs")
+def admin_traffic_logs(
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+    date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    user_id: str | None = Query(default=None, max_length=100),
+    lease_id: str | None = Query(default=None, max_length=100),
+    keyword: str = Query(default="", max_length=255),
+) -> dict:
+    target_date = date or usage_date()
+    start_at, end_at = usage_day_bounds(target_date)
+    conditions = ["r.reported_at >= ?", "r.reported_at < ?"]
+    params: list[str | int] = [start_at, end_at]
+    if user_id:
+        conditions.append("r.user_id = ?")
+        params.append(user_id)
+    if lease_id:
+        conditions.append("r.lease_id = ?")
+        params.append(lease_id)
+    if keyword.strip():
+        conditions.append(
+            "(u.email LIKE ? OR u.name LIKE ? OR r.lease_id LIKE ? OR "
+            "r.connection_id LIKE ? OR COALESCE(r.target_host, '') LIKE ?)"
+        )
+        term = f"%{keyword.strip()}%"
+        params.extend([term, term, term, term, term])
+    where = " AND ".join(conditions)
+    offset = (page - 1) * page_size
+    with db() as connection:
+        total = connection.execute(
+            f"SELECT COUNT(*) FROM usage_reports r JOIN users u ON u.id = r.user_id WHERE {where}",
+            params,
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""SELECT r.report_id, r.user_id, u.email, u.name, r.lease_id, r.connection_id,
+                       r.target_host, r.target_port, r.upload_bytes, r.download_bytes,
+                       (r.upload_bytes + r.download_bytes) AS total_bytes, r.reported_at
+                FROM usage_reports r JOIN users u ON u.id = r.user_id
+                WHERE {where}
+                ORDER BY r.reported_at DESC LIMIT ? OFFSET ?""",
+            [*params, page_size, offset],
         ).fetchall()
     return {
         "date": target_date,

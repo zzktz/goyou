@@ -81,6 +81,9 @@ button:disabled {
   letter-spacing: 0.03em;
   line-height: 1;
 }
+.dashboard-version {
+  font-size: 10px;
+}
 .auth-brand small {
   display: block;
   margin-top: 4px;
@@ -255,7 +258,7 @@ button:disabled {
   border-radius: 14px;
   background: #fff;
   box-shadow: 0 20px 55px #183d5b0e;
-  padding: 31px 34px 49px;
+  padding: 31px 34px;
 }
 .dashboard-card header {
   display: flex;
@@ -560,7 +563,7 @@ dl {
   gap: 10px;
   margin: 27px 0 17px;
 }
-dl div {
+dl > div {
   min-width: 0;
   border: 1px solid #dce4eb;
   border-radius: 7px;
@@ -599,10 +602,159 @@ dd.state {
   border: 1px solid #dce4eb;
   border-radius: 7px;
   background: #f8fbfd;
+  min-height: 82px;
+}
+.traffic-grid-card {
+  grid-column: span 2;
+  margin-top: 0;
+}
+.proxy-status-card {
+  grid-column: 1 / -1;
+  min-height: 82px;
+  padding: 12px 14px;
+  border: 1px solid #dce4eb;
+  border-radius: 7px;
+  background: #f8fbfd;
+}
+.proxy-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.proxy-status-title {
+  color: #586b7e;
+  font-size: 12px;
+}
+.proxy-status-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 99px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.proxy-status-indicator i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7b8998;
+}
+.proxy-status-indicator::after {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 4;
+  width: max-content;
+  max-width: 180px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  color: #fff;
+  background: #152942;
+  box-shadow: 0 6px 16px #183d5b2b;
+  content: attr(data-tooltip);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 3px);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+  white-space: nowrap;
+}
+.proxy-status-indicator:hover::after,
+.proxy-status-indicator:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.proxy-status-indicator.running {
+  color: #126a4a;
+  background: #e8f7ef;
+}
+.proxy-status-indicator.running i {
+  background: #16a36d;
+  animation: proxy-status-breathe 1.8s ease-in-out infinite;
+}
+.proxy-status-indicator.error {
+  color: #a52b22;
+  background: #fff0ef;
+}
+.proxy-status-indicator.error i {
+  background: #d94b3e;
+}
+.proxy-status-indicator.stopped {
+  color: #546171;
+  background: #eef1f4;
+}
+@keyframes proxy-status-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 #16a36d33;
+    opacity: 0.7;
+    transform: scale(0.85);
+  }
+  50% {
+    box-shadow: 0 0 0 5px #16a36d00;
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.proxy-status-items {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.proxy-status-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.proxy-status-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  color: #738295;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proxy-status-value {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.proxy-status-value.is-active {
+  color: #126a4a;
+}
+.proxy-status-value.is-inactive {
+  color: #546171;
+}
+.proxy-status-value.is-error {
+  color: #a52b22;
+}
+@media (prefers-reduced-motion: reduce) {
+  .proxy-status-indicator.running i {
+    animation: none;
+  }
 }
 .traffic-card.exceeded {
   border-color: #f3d7d4;
   background: #fff5f4;
+}
+.traffic-card.warning {
+  border-color: #f2d49a;
+  background: #fffaf0;
 }
 .traffic-card-header {
   display: flex;
@@ -632,9 +784,16 @@ dd.state {
 .traffic-card.exceeded .traffic-progress span {
   background: #c94b45;
 }
+.traffic-card.warning .traffic-progress span {
+  background: #d88918;
+}
 .traffic-card small {
   color: #738295;
   font-size: 11px;
+}
+.traffic-card small.traffic-alert {
+  color: #a7650d;
+  font-weight: 650;
 }
 input[type="checkbox"] {
   margin: 0 7px 0 0;
@@ -656,14 +815,6 @@ input[type="checkbox"] {
   color: #af423e;
   background: #fff5f4;
 }
-.app-version {
-  position: absolute;
-  right: 34px;
-  bottom: 18px;
-  color: #9aa7b4;
-  font-size: 11px;
-}
-
 @media (max-width: 800px) {
   .auth-card {
     max-width: none;
@@ -678,7 +829,7 @@ input[type="checkbox"] {
     min-height: 100vh;
     border: 0;
     border-radius: 0;
-    padding: 24px 20px 48px;
+    padding: 24px 20px;
   }
   .dashboard-card header {
     gap: 12px;
@@ -710,6 +861,12 @@ input[type="checkbox"] {
 }
 @media (max-width: 410px) {
   dl {
+    grid-template-columns: 1fr;
+  }
+  .traffic-grid-card {
+    grid-column: span 1;
+  }
+  .proxy-status-items {
     grid-template-columns: 1fr;
   }
 }

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { AppstoreOutlined, CloudServerOutlined, DownOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, TeamOutlined, LogoutOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, CloudServerOutlined, DownOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, TeamOutlined, LogoutOutlined, FileTextOutlined } from '@ant-design/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
@@ -9,7 +9,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const collapsed = ref(false)
 const settingsOpen = ref(false)
-const active = computed(() => route.path.startsWith('/users') ? '/users' : route.path.startsWith('/leases') ? '/leases' : route.path)
+const active = computed(() => route.path.startsWith('/users') ? '/users' : route.path.startsWith('/leases') ? '/leases' : route.path.startsWith('/traffic-logs') ? '/traffic-logs' : route.path)
 const title = computed(() => route.meta.title || '运行总览')
 const initials = computed(() => (auth.user?.name || '管').slice(0, 1))
 
@@ -28,6 +28,7 @@ function logout() { auth.logout(); router.replace('/login') }
         <a-menu-item key="/dashboard"><AppstoreOutlined /><span>运行总览</span></a-menu-item>
         <a-menu-item key="/users"><TeamOutlined /><span>用户管理</span></a-menu-item>
         <a-menu-item key="/leases"><CloudServerOutlined /><span>代理租约</span></a-menu-item>
+        <a-menu-item key="/traffic-logs"><FileTextOutlined /><span>流量日志</span></a-menu-item>
         <a-menu-divider />
         <a-menu-item key="/settings"><SettingOutlined /><span>系统设置</span></a-menu-item>
       </a-menu>

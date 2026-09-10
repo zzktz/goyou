@@ -40,6 +40,8 @@ pub fn run() {
             commands::enable_goyou,
             commands::disable_goyou,
             commands::diagnose_goyou,
+            commands::get_goyou_usage,
+            commands::control_request,
             commands::set_auto_launch,
             commands::get_auto_launch_status,
             commands::set_goyou_git_proxy

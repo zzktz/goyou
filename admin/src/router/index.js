@@ -6,6 +6,7 @@ import DashboardPage from '@/pages/DashboardPage.vue'
 import UsersPage from '@/pages/UsersPage.vue'
 import LeasesPage from '@/pages/LeasesPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
+import TrafficLogsPage from '@/pages/TrafficLogsPage.vue'
 
 const router = createRouter({
   history: createWebHistory('/admin/'),
@@ -19,6 +20,7 @@ const router = createRouter({
         { path: 'dashboard', component: DashboardPage, meta: { title: '运行总览' } },
         { path: 'users', component: UsersPage, meta: { title: '用户管理' } },
         { path: 'leases', component: LeasesPage, meta: { title: '代理租约' } },
+        { path: 'traffic-logs', component: TrafficLogsPage, meta: { title: '流量日志' } },
         { path: 'settings', component: SettingsPage, meta: { title: '系统设置' } },
       ],
     },

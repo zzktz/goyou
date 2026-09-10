@@ -5,7 +5,7 @@
 1. 使用 `GET /v1/internal/relay/leases` 同步有效租约；
 2. 为每条租约生成独立 Shadowsocks 入站和端口配置；
 3. 启用 sing-box Clash API，轮询连接上传/下载计数；
-4. 将增量流量通过 `X-Metering-Token` 上报 `/v1/internal/usage/report`；
+4. 将增量流量及连接目标域名、端口通过 `X-Metering-Token` 上报 `/v1/internal/usage/report`；
 5. API 返回超额后关闭该连接，并在下一次配置同步时移除失效租约。
 
 ## 配置

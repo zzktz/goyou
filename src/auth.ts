@@ -1,15 +1,18 @@
+import { invoke } from "@tauri-apps/api/core";
+
 export interface AuthUser {
   id: string;
   email: string;
   name: string;
   created_at: string;
+  account_expires_at: string | null;
 }
 
 export interface AuthSession {
   token: string;
   refreshToken: string;
   user: AuthUser;
-  lease: ProxyLease;
+  lease: ProxyLease | null;
 }
 
 export interface ProxyLease {
@@ -35,6 +38,8 @@ export interface UsageSummary {
   exceeded_at: string | null;
   resets_at: string;
   timezone: string;
+  account_expires_at?: string | null;
+  account_expired?: boolean;
 }
 
 interface AuthResponse {
@@ -50,31 +55,26 @@ export const API_BASE_URL = (
 ).replace(/\/$/, "");
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
-  let response: Response;
+  const headers = new Headers(init.headers);
+  const authorization = headers.get("Authorization");
+  const body = init.body ? JSON.parse(String(init.body)) : undefined;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+    return await invoke<T>("control_request", {
+      path,
+      method: init.method ?? "GET",
+      body,
+      accessToken: authorization?.replace(/^Bearer\s+/i, "") ?? null,
     });
-  } catch {
-    throw new Error("无法连接管理服务器，请检查网络或稍后重试");
+  } catch (error) {
+    if (error instanceof Error && /超时/.test(error.message)) {
+      throw error;
+    }
+    throw new Error(error instanceof Error ? error.message : String(error));
   }
-  const body = (await response.json().catch(() => null)) as
-    | { detail?: string }
-    | T
-    | null;
-  if (!response.ok) {
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? body.detail
-        : undefined;
-    throw new Error(detail || `管理服务器返回错误（${response.status}）`);
-  }
-  return body as T;
 }
 
 function saveSession(
-  response: AuthResponse & { lease: ProxyLease },
+  response: AuthResponse & { lease: ProxyLease | null },
 ): AuthSession {
   const session: AuthSession = {
     token: response.access_token,
@@ -102,8 +102,7 @@ export function getSession(): AuthSession | null {
       !session.token ||
       !session.refreshToken ||
       !session.user?.id ||
-      !session.user.email ||
-      !session.lease?.host
+      !session.user.email
     )
       return null;
     return session as AuthSession;
@@ -146,37 +145,62 @@ export async function refreshSession(
     method: "POST",
     body: JSON.stringify({ refresh_token: session.refreshToken }),
   });
-  const lease = await request<ProxyLease>("/v1/proxy/lease/refresh", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${response.access_token}` },
-    body: JSON.stringify({ lease_id: session.lease.lease_id }),
-  });
+  let lease: ProxyLease | null = null;
+  if (session.lease) {
+    try {
+      lease = await request<ProxyLease>("/v1/proxy/lease/refresh", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${response.access_token}` },
+        body: JSON.stringify({ lease_id: session.lease.lease_id }),
+      });
+    } catch (error) {
+      if (!isAccountExpiredError(error)) throw error;
+    }
+  } else {
+    try {
+      lease = await request<ProxyLease>("/v1/proxy/lease", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${response.access_token}` },
+        body: JSON.stringify({ device_id: crypto.randomUUID() }),
+      });
+    } catch (error) {
+      if (!isAccountExpiredError(error)) throw error;
+    }
+  }
   return saveSession({ ...response, lease });
 }
 
 export async function getTodayUsage(
   session: AuthSession,
 ): Promise<UsageSummary> {
-  return request<UsageSummary>("/v1/usage/today", {
-    method: "GET",
-    headers: { Authorization: `Bearer ${session.token}` },
+  return invoke<UsageSummary>("get_goyou_usage", {
+    accessToken: session.token,
   });
 }
 
 async function authenticate(response: AuthResponse): Promise<AuthSession> {
-  const lease = await request<ProxyLease>("/v1/proxy/lease", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${response.access_token}` },
-    body: JSON.stringify({ device_id: crypto.randomUUID() }),
-  });
+  let lease: ProxyLease | null = null;
+  try {
+    lease = await request<ProxyLease>("/v1/proxy/lease", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${response.access_token}` },
+      body: JSON.stringify({ device_id: crypto.randomUUID() }),
+    });
+  } catch (error) {
+    if (!isAccountExpiredError(error)) throw error;
+  }
   return saveSession({ ...response, lease });
+}
+
+function isAccountExpiredError(error: unknown): boolean {
+  return error instanceof Error && /账户已到期/.test(error.message);
 }
 
 export async function logout(): Promise<void> {
   const session = getSession();
   localStorage.removeItem(SESSION_KEY);
   if (!session) return;
-  await fetch(`${API_BASE_URL}/v1/auth/logout`, {
+  await request("/v1/auth/logout", {
     method: "POST",
     headers: { Authorization: `Bearer ${session.token}` },
   }).catch(() => undefined);

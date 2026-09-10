@@ -144,7 +144,14 @@ def start_child() -> subprocess.Popen:
     )
 
 
-def report_delta(lease_id: str, connection_id: str, upload: int, download: int) -> bool:
+def report_delta(
+    lease_id: str,
+    connection_id: str,
+    target_host: str | None,
+    target_port: int | None,
+    upload: int,
+    download: int,
+) -> bool:
     if upload <= 0 and download <= 0:
         return False
     response = request_json(
@@ -154,6 +161,9 @@ def report_delta(lease_id: str, connection_id: str, upload: int, download: int) 
             "report_id": f"{lease_id}:{connection_id}:{upload}:{download}",
             "user_id": lease_id_to_user[lease_id],
             "lease_id": lease_id,
+            "connection_id": connection_id,
+            "target_host": target_host,
+            "target_port": target_port,
             "upload_bytes": upload,
             "download_bytes": download,
         },
@@ -164,6 +174,88 @@ def report_delta(lease_id: str, connection_id: str, upload: int, download: int) 
 lease_id_to_user: dict[str, str] = {}
 
 
+def connection_inbound(connection: dict) -> str:
+    metadata = connection.get("metadata") or {}
+    for key in ("inbound", "inboundTag", "inbound_tag", "inboundName"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    connection_type = metadata.get("type")
+    if isinstance(connection_type, str) and "/" in connection_type:
+        # sing-box exposes the inbound tag as the suffix of `type` in some
+        # Clash API versions, for example `shadowsocks/lease-<id>`.
+        return connection_type.split("/", 1)[1]
+    return ""
+
+
+def connection_counter(connection: dict, *keys: str) -> int:
+    stats = connection.get("stats") or {}
+    for key in keys:
+        value = connection.get(key, stats.get(key))
+        if value is not None:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def split_host_port(value: object) -> tuple[str | None, int | None]:
+    if not isinstance(value, str):
+        return None, None
+    value = value.strip()
+    if not value:
+        return None, None
+    if value.startswith("[") and "]" in value:
+        host, _, suffix = value[1:].partition("]")
+        if suffix.startswith(":") and suffix[1:].isdigit():
+            return host, int(suffix[1:])
+        return host, None
+    if value.count(":") == 1:
+        host, port = value.rsplit(":", 1)
+        if host and port.isdigit():
+            return host, int(port)
+    return value, None
+
+
+def connection_target(connection: dict) -> tuple[str | None, int | None]:
+    metadata = connection.get("metadata") or {}
+    sources = [metadata, connection]
+    host: str | None = None
+    port: int | None = None
+    host_keys = (
+        "host",
+        "destination",
+        "destination_address",
+        "destinationAddress",
+        "destinationIP",
+        "destination_ip",
+    )
+    port_keys = ("destinationPort", "destination_port", "port")
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if host is None:
+            for key in host_keys:
+                candidate, embedded_port = split_host_port(source.get(key))
+                if candidate:
+                    host = candidate[:255]
+                    if port is None:
+                        port = embedded_port
+                    break
+        if port is None:
+            for key in port_keys:
+                candidate = source.get(key)
+                try:
+                    parsed = int(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= parsed <= 65535:
+                    port = parsed
+                    break
+    return host, port
+
+
 def poll_connections(state: dict[str, dict[str, int]]) -> None:
     try:
         connections = clash_json("/connections").get("connections", [])
@@ -172,23 +264,31 @@ def poll_connections(state: dict[str, dict[str, int]]) -> None:
     active_ids = set()
     for connection in connections:
         connection_id = str(connection.get("id", ""))
-        metadata = connection.get("metadata") or {}
-        inbound = metadata.get("inbound") or metadata.get("inboundTag") or ""
+        inbound = connection_inbound(connection)
         if not connection_id or not inbound.startswith("lease-"):
             continue
         lease_id = inbound.removeprefix("lease-")
         if lease_id not in lease_id_to_user:
             continue
         active_ids.add(connection_id)
-        upload = max(0, int(connection.get("upload", 0) or 0))
-        download = max(0, int(connection.get("download", 0) or 0))
+        upload = connection_counter(connection, "upload", "uploaded", "upload_bytes", "uplink")
+        download = connection_counter(connection, "download", "downloaded", "download_bytes", "downlink")
+        target_host, target_port = connection_target(connection)
         previous = state.get(connection_id, {"upload": 0, "download": 0})
         delta_upload = max(0, upload - int(previous.get("upload", 0)))
         delta_download = max(0, download - int(previous.get("download", 0)))
         try:
-            if report_delta(lease_id, connection_id, delta_upload, delta_download):
+            if report_delta(
+                lease_id,
+                connection_id,
+                target_host,
+                target_port,
+                delta_upload,
+                delta_download,
+            ):
                 clash_json(f"/connections/{urllib.parse.quote(connection_id, safe='')}", "DELETE")
-        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as error:
+            print(f"usage report failed for {lease_id}/{connection_id}: {error}", flush=True)
             continue
         state[connection_id] = {"upload": upload, "download": download}
     for connection_id in list(state):
