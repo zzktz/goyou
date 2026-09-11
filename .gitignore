@@ -9,6 +9,8 @@ release/
 .env.local
 .tauri-updater.key
 .tauri-updater.key.pub
+.tauri-updater-v2.key
+.tauri-updater-v2.key.pub
 *.sig
 *.tsbuildinfo
 .npmrc
