@@ -204,11 +204,25 @@ fn port_open() -> bool {
 }
 #[cfg(unix)]
 fn alive(pid: u32) -> bool {
-    Command::new("kill")
+    let exists = Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
         .map(|s| s.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !exists {
+        return false;
+    }
+    // A detached child can remain as a zombie until its parent reaps it.
+    // kill -0 still succeeds for that PID, but it is no longer a running
+    // proxy process and must not make shutdown report a false failure.
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .map(|output| {
+            let state = String::from_utf8_lossy(&output.stdout);
+            !state.trim_start().starts_with('Z')
+        })
+        .unwrap_or(exists)
 }
 #[cfg(windows)]
 fn hidden_command(program: &str) -> Command {
@@ -933,9 +947,11 @@ fn stop() -> Result<(), String> {
             .status()
             .map_err(|e| format!("无法停止代理连接：{e}"))?;
         #[cfg(unix)]
-        if !terminated.success() {
+        if !terminated.success() && alive(pid) {
             return Err("无法停止代理进程。".into());
         }
+        #[cfg(unix)]
+        let mut exited = false;
         #[cfg(unix)]
         for _ in 0..20 {
             if !alive(pid) {
@@ -945,18 +961,25 @@ fn stop() -> Result<(), String> {
                 if p.singbox_pid == Some(pid) {
                     p.singbox_pid = None;
                 }
-                continue;
+                exited = true;
+                break;
             }
             thread::sleep(Duration::from_millis(100));
         }
         #[cfg(unix)]
-        let killed = Command::new("/bin/kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()
-            .map_err(|e| format!("无法强制停止代理进程：{e}"))?;
+        if exited {
+            continue;
+        }
         #[cfg(unix)]
-        if !killed.success() || alive(pid) {
-            return Err("代理进程未能停止。".into());
+        if alive(pid) {
+            let killed = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .status()
+                .map_err(|e| format!("无法强制停止代理进程：{e}"))?;
+            #[cfg(unix)]
+            if !killed.success() && alive(pid) {
+                return Err("代理进程未能停止。".into());
+            }
         }
         #[cfg(windows)]
         {
