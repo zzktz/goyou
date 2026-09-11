@@ -81,6 +81,22 @@ button:disabled {
   letter-spacing: 0.03em;
   line-height: 1;
 }
+.brand-version-button {
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  transition:
+    border-color 0.2s,
+    color 0.2s,
+    background 0.2s;
+}
+.brand-version-button:hover,
+.brand-version-button:focus-visible {
+  border-color: #9abbd0;
+  color: #1768a7;
+  background: #edf7fd;
+  outline: 0;
+}
 .dashboard-version {
   font-size: 10px;
 }
@@ -503,6 +519,33 @@ button:disabled {
 .confirm-button {
   color: #fff;
   background: #b42318;
+}
+.update-dialog h2 {
+  line-height: 1.35;
+}
+.update-notes {
+  max-height: 130px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.update-dialog small {
+  display: block;
+  color: #738295;
+  font-size: 11px;
+}
+.update-progress {
+  height: 7px;
+  margin: -8px 0 9px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #dce8f0;
+}
+.update-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #1769aa;
+  transition: width 0.2s ease;
 }
 @keyframes modal-fade-in {
   from {

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -43,6 +46,7 @@ DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "50000000
 DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
 METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
+UPDATE_GITHUB_REPOSITORY = os.getenv("UPDATE_GITHUB_REPOSITORY", "zzktz/goyou").strip()
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
@@ -446,6 +450,77 @@ def startup() -> None:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _github_json(url: str) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "GoYou-Management-API",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="暂时无法读取版本发布信息") from error
+
+
+def _github_text(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "GoYou-Management-API"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read().decode("utf-8").strip()
+    except (OSError, urllib.error.URLError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="暂时无法读取版本签名") from error
+
+
+def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
+    assets = release.get("assets") or []
+    by_name = {asset.get("name"): asset for asset in assets if asset.get("name")}
+    platforms: dict[str, dict[str, str]] = {}
+    for name, asset in by_name.items():
+        if name.endswith(".nsis.zip"):
+            platform = "windows-x86_64"
+        elif name.endswith(".app.tar.gz"):
+            platform = "darwin-aarch64" if "aarch64" in name or "arm64" in name else "darwin-x86_64"
+        else:
+            continue
+        signature_asset = by_name.get(f"{name}.sig")
+        if not signature_asset:
+            continue
+        signature_url = signature_asset.get("browser_download_url")
+        artifact_url = asset.get("browser_download_url")
+        if not signature_url or not artifact_url:
+            continue
+        platforms[platform] = {
+            "signature": _github_text(signature_url),
+            "url": artifact_url,
+        }
+    return platforms
+
+
+@app.get("/v1/app/update/latest")
+def latest_app_update(
+    target: str | None = Query(default=None),
+    arch: str | None = Query(default=None),
+    current_version: str | None = Query(default=None),
+) -> dict:
+    """Return the signed Tauri update manifest for the latest public release."""
+    del target, arch, current_version
+    if not UPDATE_GITHUB_REPOSITORY or "/" not in UPDATE_GITHUB_REPOSITORY:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="版本发布源未配置")
+    release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
+    platforms = _update_platforms(release)
+    if not platforms:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前发布没有可用的更新包")
+    return {
+        "version": str(release.get("tag_name", "")).removeprefix("v"),
+        "notes": release.get("body") or "GoYou 新版本",
+        "pub_date": release.get("published_at") or release.get("created_at"),
+        "platforms": platforms,
+    }
 
 
 @app.post("/v1/auth/register", status_code=status.HTTP_201_CREATED)

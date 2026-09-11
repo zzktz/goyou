@@ -1,6 +1,6 @@
 {
   "name": "goyou",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "GoYou desktop proxy client",
   "type": "module",
   "scripts": {
@@ -24,6 +24,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.11.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }

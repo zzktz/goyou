@@ -1,4 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
+import {
+  check,
+  type DownloadEvent,
+  type Update,
+} from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import appPackage from "../package.json";
@@ -205,6 +211,19 @@ function Dashboard({
   const [message, setMessage] = useState("尚未检测网络连通性");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [updateState, setUpdateState] = useState<
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "installing"
+    | "latest"
+    | "error"
+  >("idle");
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const autoClosedDate = useRef<string | null>(null);
   const startupRefreshDone = useRef(false);
   const authFailureHandled = useRef(false);
@@ -518,6 +537,75 @@ function Dashboard({
       setBusy(false);
     }
   };
+  const checkForUpdates = async () => {
+    if (
+      updateState === "checking" ||
+      updateState === "downloading" ||
+      updateState === "installing"
+    ) {
+      return;
+    }
+    setUpdateDialogOpen(true);
+    setUpdateState("checking");
+    setUpdateProgress(0);
+    setUpdateError(null);
+    await availableUpdate?.close().catch(() => undefined);
+    setAvailableUpdate(null);
+    try {
+      const nextUpdate = await check({ timeout: 15_000 });
+      if (!nextUpdate) {
+        setAvailableUpdate(null);
+        setUpdateState("latest");
+        return;
+      }
+      setAvailableUpdate(nextUpdate);
+      setUpdateState("available");
+    } catch (error) {
+      setUpdateState("error");
+      setUpdateError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const closeUpdateDialog = async () => {
+    if (updateState === "downloading" || updateState === "installing") return;
+    await availableUpdate?.close().catch(() => undefined);
+    setAvailableUpdate(null);
+    setUpdateDialogOpen(false);
+    setUpdateState("idle");
+    setUpdateError(null);
+  };
+  const installUpdate = async () => {
+    if (!availableUpdate) return;
+    setBusy(true);
+    setUpdateState("downloading");
+    setUpdateProgress(0);
+    setUpdateError(null);
+    try {
+      await invoke("disable_goyou");
+      let downloaded = 0;
+      let total = 0;
+      await availableUpdate.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          if (total > 0)
+            setUpdateProgress(Math.min(100, (downloaded / total) * 100));
+        } else if (event.event === "Finished") {
+          setUpdateProgress(100);
+        }
+      });
+      setUpdateState("installing");
+      // Windows exits from downloadAndInstall after starting its installer.
+      // macOS needs an explicit relaunch to load the newly installed bundle.
+      if (/Macintosh|Mac OS X/.test(navigator.userAgent)) {
+        await relaunch();
+      }
+    } catch (error) {
+      setBusy(false);
+      setUpdateState("error");
+      setUpdateError(error instanceof Error ? error.message : String(error));
+    }
+  };
   const formatBytes = (bytes: number) => {
     const megabytes = bytes / 1000000;
     const precision =
@@ -582,9 +670,14 @@ function Dashboard({
                 <span />
               </div>
               <h1>GoYou</h1>
-              <span className="brand-version dashboard-version">
+              <button
+                className="brand-version dashboard-version brand-version-button"
+                onClick={() => void checkForUpdates()}
+                title="检查更新"
+                type="button"
+              >
                 v{appPackage.version}
-              </span>
+              </button>
             </div>
           </div>
           <div className="member-info">
@@ -764,6 +857,87 @@ function Dashboard({
                 {busy && <span className="button-spinner" />}
                 {busy ? "处理中…" : "确定"}
               </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {updateDialogOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="update-dialog-title"
+            aria-modal="true"
+            className="confirm-dialog update-dialog"
+            role="dialog"
+          >
+            <h2 id="update-dialog-title">
+              {updateState === "latest"
+                ? "已是最新版本"
+                : updateState === "error"
+                  ? "检查更新失败"
+                  : availableUpdate
+                    ? `发现 GoYou ${availableUpdate.version}`
+                    : "检查 GoYou 更新"}
+            </h2>
+            {updateState === "checking" && <p>正在连接官方更新服务，请稍候…</p>}
+            {updateState === "latest" && (
+              <p>当前版本 v{appPackage.version} 已是最新版本。</p>
+            )}
+            {updateState === "error" && (
+              <p>{updateError ?? "暂时无法获取更新信息，请稍后重试。"}</p>
+            )}
+            {availableUpdate &&
+              updateState !== "error" &&
+              updateState !== "checking" && (
+                <>
+                  <p className="update-notes">
+                    {availableUpdate.body || "本次更新包含稳定性和体验改进。"}
+                  </p>
+                  {(updateState === "downloading" ||
+                    updateState === "installing") && (
+                    <div
+                      className="update-progress"
+                      aria-label={`已下载 ${Math.round(updateProgress)}%`}
+                    >
+                      <span style={{ width: `${updateProgress}%` }} />
+                    </div>
+                  )}
+                  {updateState === "downloading" && (
+                    <small>正在下载更新… {Math.round(updateProgress)}%</small>
+                  )}
+                  {updateState === "installing" && (
+                    <small>正在安装并重启 GoYou…</small>
+                  )}
+                </>
+              )}
+            <div className="confirm-actions">
+              {updateState !== "downloading" &&
+                updateState !== "installing" && (
+                  <button
+                    className="cancel-button"
+                    onClick={() => void closeUpdateDialog()}
+                    type="button"
+                  >
+                    关闭
+                  </button>
+                )}
+              {updateState === "available" && (
+                <button
+                  className="confirm-button action-button"
+                  onClick={() => void installUpdate()}
+                  type="button"
+                >
+                  更新并重启
+                </button>
+              )}
+              {updateState === "error" && (
+                <button
+                  className="confirm-button action-button"
+                  onClick={() => void checkForUpdates()}
+                  type="button"
+                >
+                  重试
+                </button>
+              )}
             </div>
           </section>
         </div>

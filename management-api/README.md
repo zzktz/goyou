@@ -39,6 +39,7 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/traffic-logs` (管理员查看连接级流量、设备号、目标域名和端口)
 - `GET /v1/internal/relay/leases` (trusted relay configuration sync)
 - `GET /healthz`
+- `GET /v1/app/update/latest` (根据 GitHub 最新公开 Release 返回签名更新清单)
 
 管理员账号由 `ADMIN_EMAIL` 与 `ADMIN_PASSWORD_HASH`（推荐）或 `ADMIN_PASSWORD` 配置，不与客户端普通用户账号共用令牌。管理员令牌的 JWT 类型独立为 `admin_access`，不能调用客户端接口。
 
@@ -49,3 +50,8 @@ curl http://127.0.0.1:18080/healthz
 每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 500 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。`METERING_TOKEN` 只用于可信 relay 计量组件向内部接口上报上传和下载字节数；当前共享 relay 凭据尚不能区分用户，正式启用服务端限额前必须完成独立用户凭据和 relay 计量接入。
 
 管理后台前端位于仓库 `admin/`，生产地址记录在本机 `docs/敏感信息.md`。静态文件由管理服务器 Nginx 提供，`/v1/*` 仍然反代到本 API 容器。
+
+桌面端版本徽标支持手动检查更新。发布新版本前，需要在 GitHub Actions 中配置
+`TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 两个 Secrets；公钥已固化在
+`src-tauri/tauri.conf.json`。Actions 会生成并上传 Windows/macOS 的签名更新包，API 从
+`UPDATE_GITHUB_REPOSITORY`（默认 `zzktz/goyou`）的最新 Release 读取这些包和签名。
