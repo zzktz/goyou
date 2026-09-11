@@ -503,7 +503,13 @@ def _github_json(url: str) -> dict:
 
 
 def _github_text(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": "GoYou-Management-API"})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "GoYou-Management-API",
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.read().decode("utf-8").strip()
@@ -525,7 +531,10 @@ def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
         signature_asset = by_name.get(f"{name}.sig")
         if not signature_asset:
             continue
-        signature_url = signature_asset.get("browser_download_url")
+        # The browser download URL redirects through release-assets and can
+        # time out on restricted servers. GitHub's API asset URL returns the
+        # same public bytes with Accept: application/octet-stream.
+        signature_url = signature_asset.get("url") or signature_asset.get("browser_download_url")
         artifact_url = asset.get("browser_download_url")
         if not signature_url or not artifact_url:
             continue
