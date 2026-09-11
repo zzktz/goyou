@@ -997,7 +997,7 @@ async def _store_upload(upload: UploadFile, destination: Path) -> tuple[int, str
     return total, digest.hexdigest()
 
 
-async def _download_github_asset(asset: dict, destination: Path) -> tuple[int, str]:
+def _download_github_asset(asset: dict, destination: Path) -> tuple[int, str]:
     """从 GitHub API 下载资产到后台本地存储。"""
     asset_url = asset.get("url")
     if not asset_url:
@@ -1060,7 +1060,7 @@ def admin_create_release(
 
 
 @app.post("/v1/admin/releases/import-github", status_code=status.HTTP_201_CREATED)
-async def admin_import_github_release(
+def admin_import_github_release(
     payload: AdminReleaseImportRequest,
     admin: Annotated[dict[str, str], Depends(current_admin)],
 ) -> dict:
@@ -1102,7 +1102,7 @@ async def admin_import_github_release(
             if not signature_text:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{platform}签名文件为空")
             destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
-            size_bytes, sha256 = await _download_github_asset(artifact, destination)
+            size_bytes, sha256 = _download_github_asset(artifact, destination)
             storage_paths.append(destination)
             with db() as connection:
                 connection.execute(
