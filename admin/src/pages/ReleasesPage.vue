@@ -5,7 +5,7 @@ import { DeleteOutlined, EditOutlined, UploadOutlined } from '@ant-design/icons-
 import client from '@/api/client'
 
 const platforms = [
-  { key: 'windows-x86_64', label: 'Windows 64 位', packageHint: '.nsis.zip' },
+  { key: 'windows-x86_64', label: 'Windows 64 位', packageHint: '-setup.exe' },
   { key: 'darwin-aarch64', label: 'macOS Apple 芯片', packageHint: '.app.tar.gz' },
   { key: 'darwin-x86_64', label: 'macOS Intel 芯片', packageHint: '.app.tar.gz' },
 ]

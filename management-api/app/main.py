@@ -516,7 +516,7 @@ def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
     by_name = {asset.get("name"): asset for asset in assets if asset.get("name")}
     platforms: dict[str, dict[str, str]] = {}
     for name, asset in by_name.items():
-        if name.endswith(".nsis.zip"):
+        if name.endswith(".nsis.zip") or name.endswith("-setup.exe"):
             platform = "windows-x86_64"
         elif name.endswith(".app.tar.gz"):
             platform = "darwin-aarch64" if "aarch64" in name or "arm64" in name else "darwin-x86_64"
@@ -910,8 +910,8 @@ def _asset_filename(platform: str, filename: str | None) -> str:
     name = Path(filename or "").name
     if not name or name in {".", ".."}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请上传有效的更新文件")
-    if platform == "windows-x86_64" and not name.endswith(".nsis.zip"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Windows 更新包必须是 .nsis.zip 文件")
+    if platform == "windows-x86_64" and not (name.endswith("-setup.exe") or name.endswith(".nsis.zip")):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Windows 更新包必须是 -setup.exe 文件")
     if platform.startswith("darwin-") and not name.endswith(".app.tar.gz"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="macOS 更新包必须是 .app.tar.gz 文件")
     return name
