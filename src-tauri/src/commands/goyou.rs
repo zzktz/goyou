@@ -973,6 +973,28 @@ fn stop() -> Result<(), String> {
     p.singbox_pid = None;
     save(&p)
 }
+
+/// Recover settings left behind by a crash, force quit, or an OS shutdown.
+///
+/// The system proxy points at GoYou's local port, so leaving that setting
+/// enabled after the app has gone away can make every browser request fail.
+/// The normal exit hook handles graceful quits; this fallback is called during
+/// the next startup and only acts when persisted runtime state or the GoYou
+/// proxy endpoint indicates that a previous session was active.
+pub fn recover_stale_proxy() {
+    let p = read();
+    let stale = p.proxy_enabled
+        || p.pid.is_some()
+        || p.singbox_pid.is_some()
+        || system_proxy_enabled()
+        || p.git_proxy_backup_saved;
+    if !stale {
+        return;
+    }
+
+    let _ = disable_goyou();
+}
+
 #[tauri::command]
 pub fn get_goyou_status() -> Status {
     status()
