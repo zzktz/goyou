@@ -33,7 +33,7 @@ async function load(page = pagination.current, pageSize = pagination.pageSize) {
     pagination.pageSize = data.pagination.page_size
     pagination.total = data.pagination.total
   } catch (error) {
-    message.error(error.response?.data?.detail || '流量日志加载失败')
+    if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '流量日志加载失败')
   } finally { loading.value = false }
 }
 function search() { load(1) }

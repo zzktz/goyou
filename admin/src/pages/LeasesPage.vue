@@ -13,7 +13,7 @@ const labels = { active: '使用中', expired: '已过期', revoked: '已撤销'
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
 async function load(page = pagination.current, pageSize = pagination.pageSize) {
   loading.value = true
-  try { const { data } = await client.get('/v1/admin/leases', { params: { page, page_size: pageSize, keyword: filters.keyword || undefined, state: filters.state } }); rows.value = data.items; pagination.current = data.pagination.page; pagination.pageSize = data.pagination.page_size; pagination.total = data.pagination.total } catch (error) { message.error(error.response?.data?.detail || '租约列表加载失败') } finally { loading.value = false }
+  try { const { data } = await client.get('/v1/admin/leases', { params: { page, page_size: pageSize, keyword: filters.keyword || undefined, state: filters.state } }); rows.value = data.items; pagination.current = data.pagination.page; pagination.pageSize = data.pagination.page_size; pagination.total = data.pagination.total } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '租约列表加载失败') } finally { loading.value = false }
 }
 function search() { load(1) }
 function reset() { filters.keyword = ''; filters.state = undefined; load(1) }

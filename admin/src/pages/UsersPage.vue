@@ -26,14 +26,14 @@ async function load(page = pagination.current, pageSize = pagination.pageSize) {
   try {
     const { data } = await client.get('/v1/admin/users', { params: { page, page_size: pageSize, keyword: filters.keyword || undefined, state: filters.state } })
     rows.value = data.items; pagination.current = data.pagination.page; pagination.pageSize = data.pagination.page_size; pagination.total = data.pagination.total
-  } catch (error) { message.error(error.response?.data?.detail || '用户列表加载失败') } finally { loading.value = false }
+  } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '用户列表加载失败') } finally { loading.value = false }
 }
 function search() { load(1) }
 function reset() { filters.keyword = ''; filters.state = undefined; load(1) }
 function changePage(pager) { load(pager.current, pager.pageSize) }
 async function changeStatus(record, enabled) {
   updatingId.value = record.id
-  try { await client.patch(`/v1/admin/users/${record.id}/status`, { enabled }); record.enabled = enabled; message.success(enabled ? '用户已启用' : '用户已停用') } catch (error) { message.error(error.response?.data?.detail || '用户状态更新失败') } finally { updatingId.value = '' }
+  try { await client.patch(`/v1/admin/users/${record.id}/status`, { enabled }); record.enabled = enabled; message.success(enabled ? '用户已启用' : '用户已停用') } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '用户状态更新失败') } finally { updatingId.value = '' }
 }
 function formatBytes(value) {
   const bytes = Number(value || 0)
@@ -69,7 +69,7 @@ async function saveCreate() {
     createOpen.value = false
     message.success('用户已创建')
     await load(1)
-  } catch (error) { message.error(error.response?.data?.detail || '用户创建失败') } finally { createSaving.value = false }
+  } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '用户创建失败') } finally { createSaving.value = false }
 }
 async function saveExpiry() {
   if (!expiryUser.value) return
@@ -79,7 +79,7 @@ async function saveExpiry() {
     expiryUser.value.account_expires_at = data.account_expires_at
     expiryOpen.value = false
     message.success(data.account_expires_at ? '账户到期时间已更新' : '账户已设置为长期有效')
-  } catch (error) { message.error(error.response?.data?.detail || '到期时间更新失败') } finally { expirySaving.value = false }
+  } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '到期时间更新失败') } finally { expirySaving.value = false }
 }
 async function saveQuota() {
   if (!quotaUser.value || !Number.isFinite(Number(quotaMegabytes.value)) || Number(quotaMegabytes.value) < 0) return
@@ -91,7 +91,7 @@ async function saveQuota() {
     quotaUser.value.quota_exceeded = data.exceeded
     quotaOpen.value = false
     message.success('每日流量额度已更新')
-  } catch (error) { message.error(error.response?.data?.detail || '流量额度更新失败') } finally { quotaSaving.value = false }
+  } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '流量额度更新失败') } finally { quotaSaving.value = false }
 }
 onMounted(load)
 </script>

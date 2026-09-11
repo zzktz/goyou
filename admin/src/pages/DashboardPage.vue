@@ -10,7 +10,7 @@ const loading = ref(true)
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
 async function load() {
   loading.value = true
-  try { data.value = (await client.get('/v1/admin/overview')).data } catch (error) { message.error(error.response?.data?.detail || '总览加载失败') } finally { loading.value = false }
+  try { data.value = (await client.get('/v1/admin/overview')).data } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '总览加载失败') } finally { loading.value = false }
 }
 onMounted(load)
 </script>
