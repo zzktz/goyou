@@ -108,7 +108,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: GoYou ${{ github.ref_name }}
-          releaseBody: Automated desktop build.
+          releaseBody: GoYou 桌面客户端自动构建版本。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

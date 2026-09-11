@@ -1262,7 +1262,7 @@ dependencies = [
 
 [[package]]
 name = "goyou"
-version = "1.0.23"
+version = "1.0.24"
 dependencies = [
  "auto-launch",
  "dirs 5.0.1",
