@@ -51,6 +51,8 @@ interface AuthResponse {
 const SESSION_KEY = "goyou.auth.session";
 const LEGACY_SESSION_KEY = "proxyswitch.auth.session";
 const REMEMBERED_LOGIN_KEY = "goyou.login.remembered";
+const DEVICE_ID_KEY = "goyou.device.id";
+const LEGACY_DEVICE_ID_KEY = "proxyswitch.device.id";
 export const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL || "https://proxy.123371.com"
 ).replace(/\/$/, "");
@@ -190,7 +192,7 @@ export async function refreshSession(
       lease = await request<ProxyLease>("/v1/proxy/lease", {
         method: "POST",
         headers: { Authorization: `Bearer ${response.access_token}` },
-        body: JSON.stringify({ device_id: crypto.randomUUID() }),
+        body: JSON.stringify({ device_id: getDeviceId() }),
       });
     } catch (error) {
       if (!isAccountExpiredError(error)) throw error;
@@ -213,7 +215,7 @@ async function authenticate(response: AuthResponse): Promise<AuthSession> {
     lease = await request<ProxyLease>("/v1/proxy/lease", {
       method: "POST",
       headers: { Authorization: `Bearer ${response.access_token}` },
-      body: JSON.stringify({ device_id: crypto.randomUUID() }),
+      body: JSON.stringify({ device_id: getDeviceId() }),
     });
   } catch (error) {
     if (!isAccountExpiredError(error)) throw error;
@@ -223,6 +225,20 @@ async function authenticate(response: AuthResponse): Promise<AuthSession> {
 
 function isAccountExpiredError(error: unknown): boolean {
   return error instanceof Error && /账户已到期/.test(error.message);
+}
+
+function getDeviceId(): string {
+  const existing =
+    localStorage.getItem(DEVICE_ID_KEY) ||
+    localStorage.getItem(LEGACY_DEVICE_ID_KEY);
+  if (existing) {
+    localStorage.setItem(DEVICE_ID_KEY, existing);
+    localStorage.removeItem(LEGACY_DEVICE_ID_KEY);
+    return existing;
+  }
+  const deviceId = crypto.randomUUID();
+  localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  return deviceId;
 }
 
 export async function logout(): Promise<void> {

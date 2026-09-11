@@ -241,6 +241,7 @@ def init_db() -> None:
                 report_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 lease_id TEXT,
+                device_id TEXT,
                 connection_id TEXT,
                 target_host TEXT,
                 target_port INTEGER,
@@ -272,12 +273,18 @@ def init_db() -> None:
                 connection.execute("UPDATE users SET account_expires_at = ? WHERE id = ?", (expiry, user["id"]))
         usage_report_columns = {row[1] for row in connection.execute("PRAGMA table_info(usage_reports)").fetchall()}
         for column, definition in (
+            ("device_id", "TEXT"),
             ("connection_id", "TEXT"),
             ("target_host", "TEXT"),
             ("target_port", "INTEGER"),
         ):
             if column not in usage_report_columns:
                 connection.execute(f"ALTER TABLE usage_reports ADD COLUMN {column} {definition}")
+        connection.execute(
+            """UPDATE usage_reports SET device_id = (
+                   SELECT device_id FROM leases WHERE leases.id = usage_reports.lease_id
+               ) WHERE device_id IS NULL AND lease_id IS NOT NULL"""
+        )
 
 
 class RegisterRequest(BaseModel):
@@ -578,24 +585,27 @@ def report_usage(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
         if user["disabled"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户已停用")
+        lease_device_id = None
         if payload.lease_id:
             lease = connection.execute(
-                "SELECT user_id FROM leases WHERE id = ? AND revoked_at IS NULL",
+                "SELECT user_id, device_id FROM leases WHERE id = ? AND revoked_at IS NULL",
                 (payload.lease_id,),
             ).fetchone()
             if not lease or lease["user_id"] != payload.user_id:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="租约与用户不匹配")
+            lease_device_id = lease["device_id"]
         if payload.upload_bytes == 0 and payload.download_bytes == 0:
             return usage_payload(connection, payload.user_id)
         report = connection.execute(
             """INSERT OR IGNORE INTO usage_reports(
-                   report_id, user_id, lease_id, connection_id, target_host, target_port,
-                   upload_bytes, download_bytes, reported_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   report_id, user_id, lease_id, device_id, connection_id,
+                   target_host, target_port, upload_bytes, download_bytes, reported_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 payload.report_id,
                 payload.user_id,
                 payload.lease_id,
+                lease_device_id,
                 payload.connection_id,
                 payload.target_host.strip() if payload.target_host else None,
                 payload.target_port,
@@ -937,10 +947,11 @@ def admin_traffic_logs(
     if keyword.strip():
         conditions.append(
             "(u.email LIKE ? OR u.name LIKE ? OR r.lease_id LIKE ? OR "
-            "r.connection_id LIKE ? OR COALESCE(r.target_host, '') LIKE ?)"
+            "r.connection_id LIKE ? OR COALESCE(r.device_id, '') LIKE ? OR "
+            "COALESCE(r.target_host, '') LIKE ?)"
         )
         term = f"%{keyword.strip()}%"
-        params.extend([term, term, term, term, term])
+        params.extend([term, term, term, term, term, term])
     where = " AND ".join(conditions)
     offset = (page - 1) * page_size
     with db() as connection:
@@ -949,7 +960,7 @@ def admin_traffic_logs(
             params,
         ).fetchone()[0]
         rows = connection.execute(
-            f"""SELECT r.report_id, r.user_id, u.email, u.name, r.lease_id, r.connection_id,
+            f"""SELECT r.report_id, r.user_id, u.email, u.name, r.lease_id, r.device_id, r.connection_id,
                        r.target_host, r.target_port, r.upload_bytes, r.download_bytes,
                        (r.upload_bytes + r.download_bytes) AS total_bytes, r.reported_at
                 FROM usage_reports r JOIN users u ON u.id = r.user_id
