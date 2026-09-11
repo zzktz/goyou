@@ -1,0 +1,12 @@
+services:
+  github-proxy:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: goyou-github-proxy
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    read_only: true
+    volumes:
+      - ./config.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
