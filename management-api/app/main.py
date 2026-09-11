@@ -545,6 +545,46 @@ def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
     return platforms
 
 
+def _github_manifest(release: dict) -> dict | None:
+    """Read the release's generated Tauri manifest in one request.
+
+    Reading every signature asset through the GitHub API is unnecessarily
+    slow on some networks and can exceed the desktop updater's timeout. The
+    release workflow already publishes ``latest.json`` containing the same
+    signed platform entries, so prefer that single asset and keep the older
+    per-signature path as a compatibility fallback.
+    """
+    assets = release.get("assets") or []
+    manifest_asset = next((asset for asset in assets if asset.get("name") == "latest.json"), None)
+    manifest_url = manifest_asset.get("url") if manifest_asset else None
+    if not manifest_url:
+        return None
+    try:
+        manifest = json.loads(_github_text(manifest_url))
+    except (HTTPException, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    source_platforms = manifest.get("platforms")
+    if not isinstance(source_platforms, dict):
+        return None
+    platforms = {
+        platform: source_platforms[platform]
+        for platform in UPDATE_PLATFORMS
+        if isinstance(source_platforms.get(platform), dict)
+        and source_platforms[platform].get("signature")
+        and source_platforms[platform].get("url")
+    }
+    if len(platforms) != len(UPDATE_PLATFORMS):
+        return None
+    return {
+        "version": str(manifest.get("version") or release.get("tag_name", "")).removeprefix("v"),
+        "notes": manifest.get("notes") or release.get("body") or "GoYou 新版本",
+        "pub_date": manifest.get("pub_date") or release.get("published_at") or release.get("created_at"),
+        "platforms": platforms,
+    }
+
+
 def _version_key(version: str) -> tuple:
     """Sort semantic versions without adding another runtime dependency."""
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-+]([0-9A-Za-z.-]+))?$", version)
@@ -626,6 +666,9 @@ def latest_app_update(
     # created their first managed release yet.
     if UPDATE_GITHUB_REPOSITORY and "/" in UPDATE_GITHUB_REPOSITORY:
         release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
+        manifest = _github_manifest(release)
+        if manifest:
+            return manifest
         platforms = _update_platforms(release)
         if platforms:
             return {
