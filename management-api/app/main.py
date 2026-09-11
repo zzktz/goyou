@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import urllib.error
 import urllib.request
@@ -16,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import FileResponse
@@ -1059,9 +1060,35 @@ def admin_create_release(
     return _release_payload(row, [], base_url=UPDATE_PUBLIC_BASE_URL)
 
 
-@app.post("/v1/admin/releases/import-github", status_code=status.HTTP_201_CREATED)
+def _download_imported_release_assets(release_id: str, selected: dict[str, tuple[dict, dict]]) -> None:
+    """在后台线程下载 GitHub 资产，避免阻塞登录和其他 API 请求。"""
+    storage_paths: list[Path] = []
+    try:
+        for platform, (artifact, signature) in selected.items():
+            artifact_name = _asset_filename(platform, artifact.get("name"))
+            signature_text = _github_text(signature.get("url", ""))
+            if not signature_text:
+                raise RuntimeError(f"{platform}签名文件为空")
+            destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
+            size_bytes, sha256 = _download_github_asset(artifact, destination)
+            storage_paths.append(destination)
+            with db() as connection:
+                connection.execute(
+                    """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
+                )
+    except Exception:
+        with db() as connection:
+            connection.execute("DELETE FROM app_releases WHERE id = ? AND status = 'draft'", (release_id,))
+        release_dir = UPDATE_STORAGE_DIR.resolve() / release_id
+        shutil.rmtree(release_dir, ignore_errors=True)
+
+
+@app.post("/v1/admin/releases/import-github", status_code=status.HTTP_202_ACCEPTED)
 def admin_import_github_release(
     payload: AdminReleaseImportRequest,
+    background_tasks: BackgroundTasks,
     admin: Annotated[dict[str, str], Depends(current_admin)],
 ) -> dict:
     """将 GitHub 最新 Release 一键复制到后台，生成待审核草稿。"""
@@ -1089,37 +1116,18 @@ def admin_import_github_release(
     release_id = secrets.token_hex(16)
     created_at = iso(now())
     notes = payload.notes.strip() if payload.notes is not None else (release.get("body") or "GoYou 新版本").strip()
-    storage_paths: list[Path] = []
     try:
         with db() as connection:
             connection.execute(
                 "INSERT INTO app_releases(id, version, notes, status, created_at) VALUES (?, ?, ?, 'draft', ?)",
                 (release_id, version, notes, created_at),
             )
-        for platform, (artifact, signature) in selected.items():
-            artifact_name = _asset_filename(platform, artifact.get("name"))
-            signature_text = _github_text(signature.get("url", ""))
-            if not signature_text:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{platform}签名文件为空")
-            destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
-            size_bytes, sha256 = _download_github_asset(artifact, destination)
-            storage_paths.append(destination)
-            with db() as connection:
-                connection.execute(
-                    """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
-                )
-    except Exception:
-        with db() as connection:
-            connection.execute("DELETE FROM app_releases WHERE id = ?", (release_id,))
-        for path in storage_paths:
-            path.unlink(missing_ok=True)
-        raise
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该版本已经存在，请先处理已有草稿") from None
     with db() as connection:
         row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
-        stored_assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
-    return _release_payload(row, stored_assets, base_url=UPDATE_PUBLIC_BASE_URL)
+    background_tasks.add_task(_download_imported_release_assets, release_id, selected)
+    return _release_payload(row, [], base_url=UPDATE_PUBLIC_BASE_URL)
 
 
 @app.patch("/v1/admin/releases/{release_id}")

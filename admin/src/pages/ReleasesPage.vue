@@ -57,7 +57,7 @@ function importLatestRelease() {
     importing.value = true
     try {
       await client.post('/v1/admin/releases/import-github', { })
-      message.success('版本草稿已创建，确认文件无误后再发布'); await load()
+      message.success('版本草稿已创建，后台正在下载更新文件，请稍后刷新'); await load()
     } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '一键创建失败'); throw error }
     finally { importing.value = false }
   } })
