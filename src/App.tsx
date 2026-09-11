@@ -871,7 +871,7 @@ function Dashboard({
           >
             <h2 id="update-dialog-title">
               {updateState === "latest"
-                ? "已是最新版本"
+                ? "暂时没有新版本需要更新"
                 : updateState === "error"
                   ? "检查更新失败"
                   : availableUpdate
@@ -880,7 +880,7 @@ function Dashboard({
             </h2>
             {updateState === "checking" && <p>正在连接官方更新服务，请稍候…</p>}
             {updateState === "latest" && (
-              <p>当前版本 v{appPackage.version} 已是最新版本。</p>
+              <p>当前版本 v{appPackage.version} 暂时没有新版本需要更新。</p>
             )}
             {updateState === "error" && (
               <p>{updateError ?? "暂时无法获取更新信息，请稍后重试。"}</p>

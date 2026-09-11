@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import FileResponse
@@ -658,12 +658,12 @@ def _release_rows(connection: sqlite3.Connection, *, status_filter: str | None =
     return result
 
 
-@app.get("/v1/app/update/latest")
+@app.get("/v1/app/update/latest", response_model=None)
 def latest_app_update(
     target: str | None = Query(default=None),
     arch: str | None = Query(default=None),
     current_version: str | None = Query(default=None),
-) -> dict:
+) -> dict | Response:
     """Return the signed Tauri updater manifest managed by the admin console."""
     del current_version
     requested_platform = _update_platform_key(target, arch)
@@ -680,11 +680,10 @@ def latest_app_update(
             payload = _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
             return {"version": payload["version"], "notes": payload["notes"], "pub_date": payload["published_at"] or payload["created_at"], "platforms": payload["platforms"]}
 
-    if requested_platform and candidates:
-        row, assets = max(candidates, key=lambda item: _version_key(item[0]["version"]))
-        if requested_platform not in {asset["platform"] for asset in assets}:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前平台没有可用的更新版本")
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前没有管理员发布的更新版本")
+    # Tauri treats 204 as the standard, successful "没有更新" response.
+    # Returning JSON 404 here makes the client显示底层的 release JSON 错误。
+    del requested_platform
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/v1/app/update/assets/{version}/{platform}")
