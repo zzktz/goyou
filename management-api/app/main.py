@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
-import shutil
 import sqlite3
 import urllib.error
 import urllib.request
@@ -59,6 +59,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 password_hasher = PasswordHasher()
 bearer = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -265,6 +266,11 @@ def init_db() -> None:
                 version TEXT NOT NULL UNIQUE,
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'draft',
+                download_status TEXT NOT NULL DEFAULT 'manual',
+                download_platform TEXT,
+                download_error TEXT,
+                download_started_at TEXT,
+                download_finished_at TEXT,
                 created_at TEXT NOT NULL,
                 published_at TEXT
             );
@@ -311,6 +317,26 @@ def init_db() -> None:
         ):
             if column not in usage_report_columns:
                 connection.execute(f"ALTER TABLE usage_reports ADD COLUMN {column} {definition}")
+        release_columns = {row[1] for row in connection.execute("PRAGMA table_info(app_releases)").fetchall()}
+        for column, definition in (
+            ("download_status", "TEXT NOT NULL DEFAULT 'manual'"),
+            ("download_platform", "TEXT"),
+            ("download_error", "TEXT"),
+            ("download_started_at", "TEXT"),
+            ("download_finished_at", "TEXT"),
+        ):
+            if column not in release_columns:
+                connection.execute(f"ALTER TABLE app_releases ADD COLUMN {column} {definition}")
+        connection.execute(
+            "UPDATE app_releases SET download_status = 'manual' WHERE download_status IS NULL OR download_status = ''"
+        )
+        connection.execute(
+            """UPDATE app_releases
+               SET download_status = 'failed', download_platform = NULL,
+                   download_error = '后台下载任务已中断，请手动上传更新文件', download_finished_at = ?
+               WHERE status = 'draft' AND download_status = 'downloading'""",
+            (iso(now()),),
+        )
         connection.execute(
             """UPDATE usage_reports SET device_id = (
                    SELECT device_id FROM leases WHERE leases.id = usage_reports.lease_id
@@ -626,6 +652,11 @@ def _release_payload(row: sqlite3.Row, assets: list[sqlite3.Row] | list[dict], *
         "version": row["version"],
         "notes": row["notes"],
         "status": row["status"],
+        "download_status": row["download_status"] or "manual",
+        "download_platform": row["download_platform"],
+        "download_error": row["download_error"],
+        "download_started_at": row["download_started_at"],
+        "download_finished_at": row["download_finished_at"],
         "created_at": row["created_at"],
         "published_at": row["published_at"],
         "platforms": platforms,
@@ -1062,27 +1093,57 @@ def admin_create_release(
 
 def _download_imported_release_assets(release_id: str, selected: dict[str, tuple[dict, dict]]) -> None:
     """在后台线程下载 GitHub 资产，避免阻塞登录和其他 API 请求。"""
-    storage_paths: list[Path] = []
     try:
+        started_at = iso(now())
+        with db() as connection:
+            connection.execute(
+                """UPDATE app_releases
+                   SET download_status = 'downloading', download_platform = NULL,
+                       download_error = NULL, download_started_at = ?, download_finished_at = NULL
+                   WHERE id = ? AND status = 'draft'""",
+                (started_at, release_id),
+            )
         for platform, (artifact, signature) in selected.items():
+            with db() as connection:
+                connection.execute(
+                    "UPDATE app_releases SET download_platform = ? WHERE id = ? AND status = 'draft'",
+                    (platform, release_id),
+                )
             artifact_name = _asset_filename(platform, artifact.get("name"))
             signature_text = _github_text(signature.get("url", ""))
             if not signature_text:
                 raise RuntimeError(f"{platform}签名文件为空")
             destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
             size_bytes, sha256 = _download_github_asset(artifact, destination)
-            storage_paths.append(destination)
             with db() as connection:
                 connection.execute(
                     """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
                 )
-    except Exception:
         with db() as connection:
-            connection.execute("DELETE FROM app_releases WHERE id = ? AND status = 'draft'", (release_id,))
-        release_dir = UPDATE_STORAGE_DIR.resolve() / release_id
-        shutil.rmtree(release_dir, ignore_errors=True)
+            connection.execute(
+                """UPDATE app_releases
+                   SET download_status = 'completed', download_platform = NULL,
+                       download_error = NULL, download_finished_at = ?
+                   WHERE id = ? AND status = 'draft'""",
+                (iso(now()), release_id),
+            )
+    except Exception as error:
+        if isinstance(error, HTTPException):
+            error_message = str(error.detail)
+        else:
+            error_message = f"{type(error).__name__}: {error}".strip()
+        error_message = error_message[:1000]
+        logger.exception("版本 %s 自动下载失败: %s", release_id, error_message)
+        with db() as connection:
+            connection.execute(
+                """UPDATE app_releases
+                   SET download_status = 'failed', download_platform = NULL,
+                       download_error = ?, download_finished_at = ?
+                   WHERE id = ? AND status = 'draft'""",
+                (error_message or "后台下载失败，请手动上传更新文件", iso(now()), release_id),
+            )
 
 
 @app.post("/v1/admin/releases/import-github", status_code=status.HTTP_202_ACCEPTED)
@@ -1119,8 +1180,10 @@ def admin_import_github_release(
     try:
         with db() as connection:
             connection.execute(
-                "INSERT INTO app_releases(id, version, notes, status, created_at) VALUES (?, ?, ?, 'draft', ?)",
-                (release_id, version, notes, created_at),
+                """INSERT INTO app_releases(
+                       id, version, notes, status, download_status, download_started_at, created_at
+                   ) VALUES (?, ?, ?, 'draft', 'downloading', ?, ?)""",
+                (release_id, version, notes, created_at, created_at),
             )
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该版本已经存在，请先处理已有草稿") from None
@@ -1164,6 +1227,8 @@ async def admin_upload_release_asset(
         release = _release_or_404(connection, release_id)
         if release["status"] != "draft":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能替换文件，请先撤回")
+        if release["download_status"] == "downloading":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="自动下载进行中，请等待下载结束后再手动上传")
         old_asset = connection.execute("SELECT storage_path FROM app_release_assets WHERE release_id = ? AND platform = ?", (release_id, platform)).fetchone()
     destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
     try:
@@ -1183,6 +1248,8 @@ async def admin_upload_release_asset(
             current_release = _release_or_404(connection, release_id)
             if current_release["status"] != "draft":
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能替换文件，请先撤回")
+            if current_release["download_status"] == "downloading":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="自动下载进行中，请等待下载结束后再手动上传")
             connection.execute(
                 """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1190,6 +1257,13 @@ async def admin_upload_release_asset(
                    storage_path = excluded.storage_path, signature = excluded.signature,
                    size_bytes = excluded.size_bytes, sha256 = excluded.sha256, created_at = excluded.created_at""",
                 (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
+            )
+            connection.execute(
+                """UPDATE app_releases
+                   SET download_status = CASE WHEN download_status = 'failed' THEN 'manual' ELSE download_status END,
+                       download_error = CASE WHEN download_status = 'failed' THEN NULL ELSE download_error END
+                   WHERE id = ?""",
+                (release_id,),
             )
             row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
             assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
@@ -1205,6 +1279,8 @@ async def admin_upload_release_asset(
 def admin_publish_release(release_id: str, admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
     with db() as connection:
         release = _release_or_404(connection, release_id)
+        if release["download_status"] == "downloading":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="自动下载进行中，请等待下载结束后再发布")
         assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
         missing = [
             platform for platform in UPDATE_PLATFORMS
@@ -1234,6 +1310,8 @@ def admin_delete_release(release_id: str, admin: Annotated[dict[str, str], Depen
         release = _release_or_404(connection, release_id)
         if release["status"] != "draft":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能删除，请先撤回")
+        if release["download_status"] == "downloading":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="自动下载进行中，请等待下载结束后再删除")
         paths = connection.execute("SELECT storage_path FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
         connection.execute("DELETE FROM app_releases WHERE id = ?", (release_id,))
     for path in paths:

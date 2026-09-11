@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { CloudDownloadOutlined, DeleteOutlined, EditOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import client from '@/api/client'
@@ -21,6 +21,7 @@ const artifactInputs = {}
 const signatureInputs = {}
 const uploading = ref('')
 const importing = ref(false)
+let refreshTimer = null
 
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
 function formatBytes(value) {
@@ -28,6 +29,18 @@ function formatBytes(value) {
   return `${mb.toFixed(mb >= 1000 ? 1 : mb >= 10 ? 1 : 2)} MB`
 }
 function assetFor(record, platform) { return record.assets?.find(asset => asset.platform === platform) }
+function downloadStatusLabel(record) {
+  if (record.download_status === 'downloading') return record.download_platform ? `下载中：${platforms.find(platform => platform.key === record.download_platform)?.label || record.download_platform}` : '下载中'
+  if (record.download_status === 'completed') return '下载完成'
+  if (record.download_status === 'failed') return '下载失败'
+  return '手动上传'
+}
+function downloadStatusColor(record) {
+  if (record.download_status === 'downloading') return 'processing'
+  if (record.download_status === 'completed') return 'green'
+  if (record.download_status === 'failed') return 'red'
+  return 'default'
+}
 function fileKey(record, platform) { return `${record.id}:${platform}` }
 function resetFiles() { rows.value.forEach(record => platforms.forEach(({ key }) => { selected[fileKey(record, key)] = { artifact: null, signature: null } })) }
 function openCreate() { Object.assign(form, { version: '', notes: '' }); createOpen.value = true }
@@ -37,11 +50,11 @@ function chooseFile(key, kind, event) {
   selected[key][kind] = event.target.files?.[0] || null
   event.target.value = ''
 }
-async function load() {
-  loading.value = true
+async function load(showSpinner = true) {
+  if (showSpinner) loading.value = true
   try { rows.value = (await client.get('/v1/admin/releases')).data.items || []; resetFiles() }
   catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '版本列表加载失败') }
-  finally { loading.value = false }
+  finally { if (showSpinner) loading.value = false }
 }
 async function createRelease() {
   if (!/^\d+\.\d+\.\d+/.test(form.version)) return message.warning('请输入正确的版本号，例如 1.0.22')
@@ -96,7 +109,13 @@ function deleteRelease(record) {
     catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '删除版本失败') }
   } })
 }
-onMounted(() => { resetFiles(); load() })
+onMounted(() => {
+  resetFiles(); load()
+  refreshTimer = window.setInterval(() => {
+    if (rows.value.some(record => record.download_status === 'downloading')) load(false)
+  }, 5000)
+})
+onBeforeUnmount(() => { if (refreshTimer) window.clearInterval(refreshTimer) })
 </script>
 
 <template>
@@ -105,10 +124,12 @@ onMounted(() => { resetFiles(); load() })
     <a-alert type="info" show-icon message="发布要求" description="每个版本需要同时上传 Windows、macOS Apple 芯片和 macOS Intel 芯片的 updater 安装包及 .sig 文件，发布后才会对客户端可见。" class="release-notice" />
     <a-card :bordered="false"><a-spin :spinning="loading"><a-empty v-if="!rows.length && !loading" description="还没有版本草稿" /><a-collapse v-else accordion>
       <a-collapse-panel v-for="record in rows" :key="record.id">
-        <template #header><div class="release-header"><strong>v{{ record.version }}</strong><a-tag :color="record.status === 'published' ? 'green' : 'default'">{{ record.status === 'published' ? '已发布' : '草稿' }}</a-tag><span class="muted">{{ record.published_at ? `发布于 ${formatDate(record.published_at)}` : `创建于 ${formatDate(record.created_at)}` }}</span></div></template>
+        <template #header><div class="release-header"><strong>v{{ record.version }}</strong><a-tag :color="record.status === 'published' ? 'green' : 'default'">{{ record.status === 'published' ? '已发布' : '草稿' }}</a-tag><a-tag v-if="record.status === 'draft'" :color="downloadStatusColor(record)">{{ downloadStatusLabel(record) }}</a-tag><span class="muted">{{ record.published_at ? `发布于 ${formatDate(record.published_at)}` : `创建于 ${formatDate(record.created_at)}` }}</span></div></template>
         <p class="release-notes">{{ record.notes || '暂无更新说明' }}</p>
-        <div class="release-assets"><div v-for="platform in platforms" :key="platform.key" class="release-asset"><div><strong>{{ platform.label }}</strong><div v-if="assetFor(record, platform.key)" class="muted">{{ assetFor(record, platform.key).filename }} · {{ formatBytes(assetFor(record, platform.key).size_bytes) }} · SHA256 {{ assetFor(record, platform.key).sha256.slice(0, 12) }}…</div><div v-else class="muted">尚未上传（{{ platform.packageHint }}）</div></div><a-tag v-if="assetFor(record, platform.key)" color="green">已上传</a-tag><a-tag v-else>待上传</a-tag><template v-if="record.status === 'draft'"><input :ref="el => artifactInputs[fileKey(record, platform.key)] = el" type="file" hidden @change="chooseFile(fileKey(record, platform.key), 'artifact', $event)" /><input :ref="el => signatureInputs[fileKey(record, platform.key)] = el" type="file" hidden accept=".sig" @change="chooseFile(fileKey(record, platform.key), 'signature', $event)" /><a-button size="small" @click="artifactInputs[fileKey(record, platform.key)]?.click()">选择安装包</a-button><a-button size="small" @click="signatureInputs[fileKey(record, platform.key)]?.click()">选择签名</a-button><a-button size="small" type="primary" :loading="uploading === `${record.id}:${platform.key}`" :disabled="!(selected[fileKey(record, platform.key)]?.artifact && selected[fileKey(record, platform.key)]?.signature)" @click="uploadAsset(record, platform.key)"><UploadOutlined />上传</a-button></template></div></div>
-        <div class="release-actions"><a-button v-if="record.status === 'draft'" @click="openEdit(record)"><EditOutlined />编辑说明</a-button><a-button v-if="record.status === 'draft'" type="primary" @click="publish(record)">发布版本</a-button><a-button v-else @click="unpublish(record)">撤回版本</a-button><a-button v-if="record.status === 'draft'" danger @click="deleteRelease(record)"><DeleteOutlined />删除草稿</a-button></div>
+        <a-alert v-if="record.download_status === 'downloading'" type="info" show-icon message="正在后台下载更新文件，请等待下载完成后再上传或发布。" class="release-notice" />
+        <a-alert v-if="record.download_status === 'failed'" type="error" show-icon :message="`后台下载失败：${record.download_error || '未知原因'}，可手动上传文件。`" class="release-notice" />
+        <div class="release-assets"><div v-for="platform in platforms" :key="platform.key" class="release-asset"><div><strong>{{ platform.label }}</strong><div v-if="assetFor(record, platform.key)" class="muted">{{ assetFor(record, platform.key).filename }} · {{ formatBytes(assetFor(record, platform.key).size_bytes) }} · SHA256 {{ assetFor(record, platform.key).sha256.slice(0, 12) }}…</div><div v-else class="muted">尚未上传（{{ platform.packageHint }}）</div></div><a-tag v-if="assetFor(record, platform.key)" color="green">已上传</a-tag><a-tag v-else>待上传</a-tag><template v-if="record.status === 'draft'"><input :ref="el => artifactInputs[fileKey(record, platform.key)] = el" type="file" hidden @change="chooseFile(fileKey(record, platform.key), 'artifact', $event)" /><input :ref="el => signatureInputs[fileKey(record, platform.key)] = el" type="file" hidden accept=".sig" @change="chooseFile(fileKey(record, platform.key), 'signature', $event)" /><a-button size="small" :disabled="record.download_status === 'downloading'" @click="artifactInputs[fileKey(record, platform.key)]?.click()">选择安装包</a-button><a-button size="small" :disabled="record.download_status === 'downloading'" @click="signatureInputs[fileKey(record, platform.key)]?.click()">选择签名</a-button><a-button size="small" type="primary" :loading="uploading === `${record.id}:${platform.key}`" :disabled="record.download_status === 'downloading' || !(selected[fileKey(record, platform.key)]?.artifact && selected[fileKey(record, platform.key)]?.signature)" @click="uploadAsset(record, platform.key)"><UploadOutlined />上传</a-button></template></div></div>
+        <div class="release-actions"><a-button v-if="record.status === 'draft'" @click="openEdit(record)"><EditOutlined />编辑说明</a-button><a-button v-if="record.status === 'draft'" type="primary" :disabled="record.download_status === 'downloading'" @click="publish(record)">发布版本</a-button><a-button v-else @click="unpublish(record)">撤回版本</a-button><a-button v-if="record.status === 'draft'" danger :disabled="record.download_status === 'downloading'" @click="deleteRelease(record)"><DeleteOutlined />删除草稿</a-button></div>
       </a-collapse-panel>
     </a-collapse></a-spin></a-card>
     <a-modal v-model:open="createOpen" title="创建版本草稿" :confirm-loading="saving" ok-text="创建" cancel-text="取消" @ok="createRelease"><a-form layout="vertical"><a-form-item label="版本号" required><a-input v-model:value="form.version" placeholder="例如 1.0.22" /></a-form-item><a-form-item label="更新说明"><a-textarea v-model:value="form.notes" :rows="6" placeholder="描述本次版本更新内容" /></a-form-item></a-form></a-modal>
