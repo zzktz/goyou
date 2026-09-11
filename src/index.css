@@ -871,10 +871,10 @@ input[type="checkbox"] {
   line-height: 1.5;
   margin: 20px 0 0;
 }
-.message.error {
-  border-color: #f3d7d4;
-  color: #af423e;
-  background: #fff5f4;
+.message.warning {
+  border-color: #f2d49a;
+  color: #a7650d;
+  background: #fffaf0;
 }
 @media (max-width: 800px) {
   .auth-card {

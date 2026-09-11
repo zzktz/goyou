@@ -39,6 +39,8 @@ interface Diagnostic {
   error: string | null;
 }
 
+type MessageTone = "normal" | "warning";
+
 function isAuthFailure(error: unknown): boolean {
   return error instanceof Error && /登录|令牌|401/.test(error.message);
 }
@@ -209,6 +211,7 @@ function Dashboard({
   >(null);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [message, setMessage] = useState("尚未检测网络连通性");
+  const [messageTone, setMessageTone] = useState<MessageTone>("normal");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
@@ -230,6 +233,14 @@ function Dashboard({
   const accountExpiryHandled = useRef(false);
   const currentSession = useRef(session);
   const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
+
+  const setInfoMessage = useCallback(
+    (nextMessage: string, tone: MessageTone = "normal") => {
+      setMessage(nextMessage);
+      setMessageTone(tone);
+    },
+    [],
+  );
 
   useEffect(() => {
     currentSession.current = session;
@@ -271,8 +282,8 @@ function Dashboard({
         .then(setStatus)
         .catch(() => undefined);
     }
-    setMessage("您的账户已到期，不可继续使用代理。");
-  }, []);
+    setInfoMessage("您的账户已到期，不可继续使用代理。", "warning");
+  }, [setInfoMessage]);
 
   const refresh = useCallback(
     async (activeSession: AuthSession = session) => {
@@ -380,7 +391,7 @@ function Dashboard({
           if (isAccountExpired(nextSession.user.account_expires_at)) {
             return handleAccountExpired();
           }
-          setMessage("登录令牌和代理租约已刷新");
+          setInfoMessage("登录令牌和代理租约已刷新");
         })
         .catch((error) => {
           if (isAccountExpiredError(error)) {
@@ -388,7 +399,7 @@ function Dashboard({
           } else if (isAuthFailure(error)) {
             void handleAuthFailure();
           } else {
-            setMessage("登录状态暂时无法刷新，请稍后重试");
+            setInfoMessage("登录状态暂时无法刷新，请稍后重试", "warning");
           }
         });
     }, 10 * 60_000);
@@ -398,6 +409,7 @@ function Dashboard({
     handleAuthFailure,
     onSessionRefreshed,
     refreshAuthenticatedSession,
+    setInfoMessage,
   ]);
 
   useEffect(() => {
@@ -415,12 +427,15 @@ function Dashboard({
       return;
     }
     if (usage?.exceeded) {
-      setMessage("今日流量额度已用尽，代理将在明日 00:00 后恢复");
+      setInfoMessage(
+        "今日流量额度已用尽，代理将在明日 00:00 后恢复",
+        "warning",
+      );
       return;
     }
     setBusy(true);
     setBusyAction("enable");
-    setMessage("正在检查登录状态和流量额度…");
+    setInfoMessage("正在检查登录状态和流量额度…");
     try {
       const activeSession = await refreshAuthenticatedSession();
       onSessionRefreshed(activeSession);
@@ -429,7 +444,7 @@ function Dashboard({
         return;
       }
       if (!activeSession.lease) {
-        setMessage("代理租约暂不可用，请稍后重试");
+        setInfoMessage("代理租约暂不可用，请稍后重试", "warning");
         return;
       }
       const latestUsage = await getTodayUsage(activeSession);
@@ -440,29 +455,32 @@ function Dashboard({
         return;
       }
       if (latestUsage.exceeded) {
-        setMessage("今日流量额度已用尽，代理将在明日 00:00 后恢复");
+        setInfoMessage(
+          "今日流量额度已用尽，代理将在明日 00:00 后恢复",
+          "warning",
+        );
         return;
       }
       await invoke("enable_goyou", { lease: activeSession.lease });
       await refresh(activeSession);
-      setMessage("代理已开启");
+      setInfoMessage("代理已开启");
     } catch (error) {
       if (isAccountExpiredError(error)) {
         await handleAccountExpired();
       } else if (isAuthFailure(error)) {
         await handleAuthFailure();
       } else {
-        setMessage(String(error));
+        setInfoMessage(String(error), "warning");
       }
     } finally {
       setBusy(false);
       setBusyAction(null);
     }
   };
-  const disable = async () => {
+  const disable = async (tone: MessageTone = "normal") => {
     setBusy(true);
     setBusyAction("disable");
-    setMessage("正在关闭代理…");
+    setInfoMessage("正在关闭代理…", tone);
     // Let React paint the loading state before the native command starts. On
     // Windows the IPC call can otherwise occupy the current frame, making the
     // button look unresponsive until the proxy has already stopped.
@@ -472,9 +490,9 @@ function Dashboard({
     try {
       await invoke("disable_goyou");
       await refresh();
-      setMessage("代理已关闭");
+      setInfoMessage("代理已关闭");
     } catch (error) {
-      setMessage(String(error));
+      setInfoMessage(String(error), "warning");
     } finally {
       setBusy(false);
       setBusyAction(null);
@@ -493,11 +511,16 @@ function Dashboard({
       return;
     }
     autoClosedDate.current = usage.date;
-    setMessage("今日流量额度已用尽，正在自动关闭代理");
-    void disable()
-      .then(() => setMessage("今日流量额度已用尽，代理已自动关闭"))
+    setInfoMessage("今日流量额度已用尽，正在自动关闭代理", "warning");
+    void disable("warning")
+      .then(() =>
+        setInfoMessage("今日流量额度已用尽，代理已自动关闭", "warning"),
+      )
       .catch((error) =>
-        setMessage(`今日流量额度已用尽，但自动关闭失败：${String(error)}`),
+        setInfoMessage(
+          `今日流量额度已用尽，但自动关闭失败：${String(error)}`,
+          "warning",
+        ),
       );
   }, [busy, status?.tunnelRunning, usage]);
   const diagnose = async () => {
@@ -514,13 +537,14 @@ function Dashboard({
       const diagnosticError = result.error?.includes("proxy")
         ? "代理上游节点不可达，请稍后重试"
         : result.error;
-      setMessage(
+      setInfoMessage(
         result.githubReachable
           ? `${reachability}；耗时 ${result.latencyMs} ms；${gitProxyStatus}`
           : `${reachability}；${diagnosticError ?? "网络不可达"}`,
+        result.githubReachable ? "normal" : "warning",
       );
     } catch (error) {
-      setMessage(String(error));
+      setInfoMessage(String(error), "warning");
     } finally {
       setBusy(false);
       setBusyAction(null);
@@ -532,7 +556,7 @@ function Dashboard({
       await invoke(command, { enabled });
       await refresh();
     } catch (error) {
-      setMessage(String(error));
+      setInfoMessage(String(error), "warning");
     } finally {
       setBusy(false);
     }
@@ -623,7 +647,10 @@ function Dashboard({
     try {
       await invoke("disable_goyou");
     } catch (error) {
-      setMessage(`关闭代理返回提示，仍将退出登录：${String(error)}`);
+      setInfoMessage(
+        `关闭代理返回提示，仍将退出登录：${String(error)}`,
+        "warning",
+      );
     } finally {
       onLogout();
       setBusy(false);
@@ -825,7 +852,12 @@ function Dashboard({
             Git使用代理
           </label>
         </div>
-        <p className={`message ${status?.lastError ? "error" : ""}`}>
+        <p
+          className={`message ${messageTone === "warning" || status?.lastError ? "warning" : ""}`}
+          role={
+            messageTone === "warning" || status?.lastError ? "alert" : "status"
+          }
+        >
           {displayedMessage}
         </p>
       </section>
