@@ -545,7 +545,20 @@ def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
     return platforms
 
 
-def _github_manifest(release: dict) -> dict | None:
+def _update_platform_key(target: str | None, arch: str | None) -> str | None:
+    target_value = (target or "").strip().lower()
+    arch_value = (arch or "").strip().lower()
+    if target_value == "windows":
+        return "windows-x86_64" if arch_value in {"x86_64", "x64", "amd64"} else None
+    if target_value in {"darwin", "macos"}:
+        if arch_value in {"aarch64", "arm64"}:
+            return "darwin-aarch64"
+        if arch_value in {"x86_64", "x64", "amd64"}:
+            return "darwin-x86_64"
+    return None
+
+
+def _github_manifest(release: dict, requested_platform: str | None = None) -> dict | None:
     """Read the release's generated Tauri manifest in one request.
 
     Reading every signature asset through the GitHub API is unnecessarily
@@ -575,7 +588,7 @@ def _github_manifest(release: dict) -> dict | None:
         and source_platforms[platform].get("signature")
         and source_platforms[platform].get("url")
     }
-    if len(platforms) != len(UPDATE_PLATFORMS):
+    if not platforms or (requested_platform and requested_platform not in platforms):
         return None
     return {
         "version": str(manifest.get("version") or release.get("tag_name", "")).removeprefix("v"),
@@ -648,7 +661,8 @@ def latest_app_update(
     current_version: str | None = Query(default=None),
 ) -> dict:
     """Return the signed Tauri updater manifest managed by the admin console."""
-    del target, arch, current_version
+    del current_version
+    requested_platform = _update_platform_key(target, arch)
     with db() as connection:
         rows = connection.execute("SELECT * FROM app_releases WHERE status = 'published'").fetchall()
         candidates = []
@@ -666,10 +680,12 @@ def latest_app_update(
     # created their first managed release yet.
     if UPDATE_GITHUB_REPOSITORY and "/" in UPDATE_GITHUB_REPOSITORY:
         release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
-        manifest = _github_manifest(release)
+        manifest = _github_manifest(release, requested_platform)
         if manifest:
             return manifest
         platforms = _update_platforms(release)
+        if requested_platform and requested_platform not in platforms:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前平台更新包尚未准备好")
         if platforms:
             return {
                 "version": str(release.get("tag_name", "")).removeprefix("v"),
