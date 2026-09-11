@@ -62,5 +62,5 @@ curl http://127.0.0.1:18080/healthz
 桌面端版本徽标支持手动检查更新。管理员在后台“版本发布”页面创建草稿，分别上传
 Windows、macOS Apple 芯片和 macOS Intel 芯片的 updater 包及 `.sig` 签名文件，确认三个平台齐全后发布。
 文件默认保存到 `UPDATE_STORAGE_DIR`（生产环境应挂载持久化磁盘），公开下载地址使用
-`UPDATE_PUBLIC_BASE_URL`。客户端更新接口优先读取后台已发布版本；在尚未发布任何后台版本的旧部署上，
-可临时从 `UPDATE_GITHUB_REPOSITORY` 的最新 Release 兼容读取。
+`UPDATE_PUBLIC_BASE_URL`。客户端更新接口只读取后台已发布版本，不会自动读取 GitHub 或其他来源的版本。
+管理员可在后台使用“一键创建”从配置的 GitHub Release 导入版本草稿，审核后再发布。

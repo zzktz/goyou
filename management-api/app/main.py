@@ -379,6 +379,10 @@ class AdminReleaseUpdateRequest(BaseModel):
     notes: str = Field(default="", max_length=10000)
 
 
+class AdminReleaseImportRequest(BaseModel):
+    notes: str | None = Field(default=None, max_length=10000)
+
+
 class UsageReportRequest(BaseModel):
     report_id: str = Field(min_length=8, max_length=200)
     user_id: str = Field(min_length=1, max_length=100)
@@ -676,24 +680,11 @@ def latest_app_update(
             payload = _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
             return {"version": payload["version"], "notes": payload["notes"], "pub_date": payload["published_at"] or payload["created_at"], "platforms": payload["platforms"]}
 
-    # Keep an optional compatibility fallback for installations that have not
-    # created their first managed release yet.
-    if UPDATE_GITHUB_REPOSITORY and "/" in UPDATE_GITHUB_REPOSITORY:
-        release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
-        manifest = _github_manifest(release, requested_platform)
-        if manifest:
-            return manifest
-        platforms = _update_platforms(release)
-        if requested_platform and requested_platform not in platforms:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前平台更新包尚未准备好")
-        if platforms:
-            return {
-                "version": str(release.get("tag_name", "")).removeprefix("v"),
-                "notes": release.get("body") or "GoYou 新版本",
-                "pub_date": release.get("published_at") or release.get("created_at"),
-                "platforms": platforms,
-            }
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前没有可用的更新版本")
+    if requested_platform and candidates:
+        row, assets = max(candidates, key=lambda item: _version_key(item[0]["version"]))
+        if requested_platform not in {asset["platform"] for asset in assets}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前平台没有可用的更新版本")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前没有管理员发布的更新版本")
 
 
 @app.get("/v1/app/update/assets/{version}/{platform}")
@@ -1007,6 +998,40 @@ async def _store_upload(upload: UploadFile, destination: Path) -> tuple[int, str
     return total, digest.hexdigest()
 
 
+async def _download_github_asset(asset: dict, destination: Path) -> tuple[int, str]:
+    """从 GitHub API 下载资产到后台本地存储。"""
+    asset_url = asset.get("url")
+    if not asset_url:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="GitHub 更新资产地址无效")
+    request = urllib.request.Request(
+        asset_url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "GoYou-Management-API",
+        },
+    )
+    temporary = destination.with_name(f".{destination.name}.downloading")
+    total = 0
+    digest = hashlib.sha256()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as handle:
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > UPDATE_MAX_ASSET_BYTES:
+                    raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="GitHub 更新文件超过大小限制")
+                digest.update(chunk)
+                handle.write(chunk)
+        temporary.replace(destination)
+    except HTTPException:
+        temporary.unlink(missing_ok=True)
+        raise
+    except (OSError, urllib.error.URLError) as error:
+        temporary.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="暂时无法下载 GitHub 更新文件") from error
+    return total, digest.hexdigest()
+
+
 @app.get("/v1/admin/releases")
 def admin_releases(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
     with db() as connection:
@@ -1033,6 +1058,69 @@ def admin_create_release(
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该版本已经存在") from None
     return _release_payload(row, [], base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.post("/v1/admin/releases/import-github", status_code=status.HTTP_201_CREATED)
+async def admin_import_github_release(
+    payload: AdminReleaseImportRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    """将 GitHub 最新 Release 一键复制到后台，生成待审核草稿。"""
+    del admin
+    if not UPDATE_GITHUB_REPOSITORY or "/" not in UPDATE_GITHUB_REPOSITORY:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="尚未配置 GitHub 仓库")
+    release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
+    version = str(release.get("tag_name", "")).removeprefix("v")
+    if not re.match(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$", version):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GitHub Release 版本号无效")
+    assets = {asset.get("name"): asset for asset in release.get("assets") or [] if asset.get("name")}
+    selected: dict[str, tuple[dict, dict]] = {}
+    for platform in UPDATE_PLATFORMS:
+        if platform == "windows-x86_64":
+            artifact = next((asset for name, asset in assets.items() if name.endswith("-setup.exe") or name.endswith(".nsis.zip")), None)
+        elif platform == "darwin-aarch64":
+            artifact = next((asset for name, asset in assets.items() if name.endswith(".app.tar.gz") and ("aarch64" in name or "arm64" in name)), None)
+        else:
+            artifact = next((asset for name, asset in assets.items() if name.endswith(".app.tar.gz") and "aarch64" not in name and "arm64" not in name), None)
+        signature = assets.get(f"{artifact.get('name')}.sig") if artifact else None
+        if not artifact or not signature:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"GitHub Release 缺少{platform}更新包或签名")
+        selected[platform] = (artifact, signature)
+
+    release_id = secrets.token_hex(16)
+    created_at = iso(now())
+    notes = payload.notes.strip() if payload.notes is not None else (release.get("body") or "GoYou 新版本").strip()
+    storage_paths: list[Path] = []
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO app_releases(id, version, notes, status, created_at) VALUES (?, ?, ?, 'draft', ?)",
+                (release_id, version, notes, created_at),
+            )
+        for platform, (artifact, signature) in selected.items():
+            artifact_name = _asset_filename(platform, artifact.get("name"))
+            signature_text = _github_text(signature.get("url", ""))
+            if not signature_text:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{platform}签名文件为空")
+            destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
+            size_bytes, sha256 = await _download_github_asset(artifact, destination)
+            storage_paths.append(destination)
+            with db() as connection:
+                connection.execute(
+                    """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
+                )
+    except Exception:
+        with db() as connection:
+            connection.execute("DELETE FROM app_releases WHERE id = ?", (release_id,))
+        for path in storage_paths:
+            path.unlink(missing_ok=True)
+        raise
+    with db() as connection:
+        row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+        stored_assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+    return _release_payload(row, stored_assets, base_url=UPDATE_PUBLIC_BASE_URL)
 
 
 @app.patch("/v1/admin/releases/{release_id}")

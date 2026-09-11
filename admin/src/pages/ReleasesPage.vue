@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { DeleteOutlined, EditOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { CloudDownloadOutlined, DeleteOutlined, EditOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import client from '@/api/client'
 
 const platforms = [
@@ -20,6 +20,7 @@ const selected = reactive({})
 const artifactInputs = {}
 const signatureInputs = {}
 const uploading = ref('')
+const importing = ref(false)
 
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
 function formatBytes(value) {
@@ -50,6 +51,16 @@ async function createRelease() {
     createOpen.value = false; message.success('版本草稿已创建'); await load()
   } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '创建版本失败') }
   finally { saving.value = false }
+}
+function importLatestRelease() {
+  Modal.confirm({ title: '一键创建版本', content: '将从 GitHub 最新 Release 下载三平台更新包和签名，创建为后台草稿。确认继续吗？', okText: '开始创建', cancelText: '取消', async onOk() {
+    importing.value = true
+    try {
+      await client.post('/v1/admin/releases/import-github', { })
+      message.success('版本草稿已创建，确认文件无误后再发布'); await load()
+    } catch (error) { if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '一键创建失败'); throw error }
+    finally { importing.value = false }
+  } })
 }
 async function saveNotes() {
   if (!editing.value) return
@@ -90,7 +101,7 @@ onMounted(() => { resetFiles(); load() })
 
 <template>
   <div>
-    <div class="page-title"><div><h1>版本发布</h1><p>在后台管理 GoYou 更新版本、安装包和签名文件，发布后客户端会自动读取。</p></div><a-space><a-button @click="load">刷新</a-button><a-button type="primary" @click="openCreate">创建版本</a-button></a-space></div>
+    <div class="page-title"><div><h1>版本发布</h1><p>仅有后台已发布的版本会提供给客户端更新。</p></div><a-space><a-button @click="load">刷新</a-button><a-button :loading="importing" @click="importLatestRelease"><CloudDownloadOutlined />一键创建</a-button><a-button type="primary" @click="openCreate">手动创建</a-button></a-space></div>
     <a-alert type="info" show-icon message="发布要求" description="每个版本需要同时上传 Windows、macOS Apple 芯片和 macOS Intel 芯片的 updater 安装包及 .sig 文件，发布后才会对客户端可见。" class="release-notice" />
     <a-card :bordered="false"><a-spin :spinning="loading"><a-empty v-if="!rows.length && !loading" description="还没有版本草稿" /><a-collapse v-else accordion>
       <a-collapse-panel v-for="record in rows" :key="record.id">
