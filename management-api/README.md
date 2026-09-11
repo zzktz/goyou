@@ -39,7 +39,15 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/traffic-logs` (管理员查看连接级流量、设备号、目标域名和端口)
 - `GET /v1/internal/relay/leases` (trusted relay configuration sync)
 - `GET /healthz`
-- `GET /v1/app/update/latest` (根据 GitHub 最新公开 Release 返回签名更新清单)
+- `GET /v1/app/update/latest` (返回后台已发布的签名更新清单)
+- `GET /v1/app/update/assets/{version}/{platform}` (下载已发布的更新包)
+- `GET /v1/admin/releases`
+- `POST /v1/admin/releases`
+- `PATCH /v1/admin/releases/{release_id}`
+- `POST /v1/admin/releases/{release_id}/assets/{platform}` (multipart: `artifact` + `signature`)
+- `POST /v1/admin/releases/{release_id}/publish`
+- `POST /v1/admin/releases/{release_id}/unpublish`
+- `DELETE /v1/admin/releases/{release_id}`
 
 管理员账号由 `ADMIN_EMAIL` 与 `ADMIN_PASSWORD_HASH`（推荐）或 `ADMIN_PASSWORD` 配置，不与客户端普通用户账号共用令牌。管理员令牌的 JWT 类型独立为 `admin_access`，不能调用客户端接口。
 
@@ -51,7 +59,8 @@ curl http://127.0.0.1:18080/healthz
 
 管理后台前端位于仓库 `admin/`，生产地址记录在本机 `docs/敏感信息.md`。静态文件由管理服务器 Nginx 提供，`/v1/*` 仍然反代到本 API 容器。
 
-桌面端版本徽标支持手动检查更新。发布新版本前，需要在 GitHub Actions 中配置
-`TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 两个 Secrets；公钥已固化在
-`src-tauri/tauri.conf.json`。Actions 会生成并上传 Windows/macOS 的签名更新包，API 从
-`UPDATE_GITHUB_REPOSITORY`（默认 `zzktz/goyou`）的最新 Release 读取这些包和签名。
+桌面端版本徽标支持手动检查更新。管理员在后台“版本发布”页面创建草稿，分别上传
+Windows、macOS Apple 芯片和 macOS Intel 芯片的 updater 包及 `.sig` 签名文件，确认三个平台齐全后发布。
+文件默认保存到 `UPDATE_STORAGE_DIR`（生产环境应挂载持久化磁盘），公开下载地址使用
+`UPDATE_PUBLIC_BASE_URL`。客户端更新接口优先读取后台已发布版本；在尚未发布任何后台版本的旧部署上，
+可临时从 `UPDATE_GITHUB_REPOSITORY` 的最新 Release 兼容读取。

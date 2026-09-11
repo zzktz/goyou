@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import urllib.error
@@ -15,9 +16,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -47,6 +49,10 @@ DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
 METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
 UPDATE_GITHUB_REPOSITORY = os.getenv("UPDATE_GITHUB_REPOSITORY", "zzktz/goyou").strip()
+UPDATE_STORAGE_DIR = Path(os.getenv("UPDATE_STORAGE_DIR", str(DB_PATH.parent / "updates")))
+UPDATE_MAX_ASSET_BYTES = int(os.getenv("UPDATE_MAX_ASSET_BYTES", "2000000000"))
+UPDATE_PLATFORMS = ("windows-x86_64", "darwin-aarch64", "darwin-x86_64")
+UPDATE_PUBLIC_BASE_URL = os.getenv("UPDATE_PUBLIC_BASE_URL", "https://proxy.123371.com").rstrip("/")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
@@ -253,9 +259,29 @@ def init_db() -> None:
                 download_bytes INTEGER NOT NULL,
                 reported_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS app_releases (
+                id TEXT PRIMARY KEY,
+                version TEXT NOT NULL UNIQUE,
+                notes TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                created_at TEXT NOT NULL,
+                published_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS app_release_assets (
+                release_id TEXT NOT NULL REFERENCES app_releases(id) ON DELETE CASCADE,
+                platform TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (release_id, platform)
+            );
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_reported_at ON usage_reports(reported_at);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_user_id ON usage_reports(user_id);
+            CREATE INDEX IF NOT EXISTS idx_app_releases_status ON app_releases(status, published_at);
             """
         )
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
@@ -342,6 +368,15 @@ class AdminQuotaRequest(BaseModel):
 
 class AdminAccountExpiryRequest(BaseModel):
     account_expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class AdminReleaseCreateRequest(BaseModel):
+    version: str = Field(pattern=r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$", max_length=64)
+    notes: str = Field(default="", max_length=10000)
+
+
+class AdminReleaseUpdateRequest(BaseModel):
+    notes: str = Field(default="", max_length=10000)
 
 
 class UsageReportRequest(BaseModel):
@@ -501,26 +536,116 @@ def _update_platforms(release: dict) -> dict[str, dict[str, str]]:
     return platforms
 
 
+def _version_key(version: str) -> tuple:
+    """Sort semantic versions without adding another runtime dependency."""
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-+]([0-9A-Za-z.-]+))?$", version)
+    if not match:
+        return (0, 0, 0, 0, version)
+    prerelease = match.group(4)
+    # Stable releases sort after prereleases of the same numeric version.
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)), 1 if not prerelease else 0, prerelease or "")
+
+
+def _release_payload(row: sqlite3.Row, assets: list[sqlite3.Row] | list[dict], *, base_url: str) -> dict:
+    platforms = {}
+    for asset in assets:
+        platform = asset["platform"] if isinstance(asset, sqlite3.Row) else asset.get("platform")
+        platforms[platform] = {
+            "url": f"{base_url}/v1/app/update/assets/{row['version']}/{platform}",
+            "signature": asset["signature"] if isinstance(asset, sqlite3.Row) else asset.get("signature", ""),
+        }
+    return {
+        "id": row["id"],
+        "version": row["version"],
+        "notes": row["notes"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "published_at": row["published_at"],
+        "platforms": platforms,
+        "assets": [
+            {
+                "platform": asset["platform"] if isinstance(asset, sqlite3.Row) else asset.get("platform"),
+                "filename": asset["filename"] if isinstance(asset, sqlite3.Row) else asset.get("filename"),
+                "size_bytes": int(asset["size_bytes"] if isinstance(asset, sqlite3.Row) else asset.get("size_bytes", 0)),
+                "sha256": asset["sha256"] if isinstance(asset, sqlite3.Row) else asset.get("sha256"),
+                "created_at": asset["created_at"] if isinstance(asset, sqlite3.Row) else asset.get("created_at"),
+            }
+            for asset in assets
+        ],
+    }
+
+
+def _release_rows(connection: sqlite3.Connection, *, status_filter: str | None = None) -> list[dict]:
+    query = "SELECT * FROM app_releases"
+    params: tuple = ()
+    if status_filter:
+        query += " WHERE status = ?"
+        params = (status_filter,)
+    rows = connection.execute(query, params).fetchall()
+    result = []
+    for row in rows:
+        assets = connection.execute(
+            "SELECT platform, filename, storage_path, signature, size_bytes, sha256, created_at FROM app_release_assets WHERE release_id = ? ORDER BY platform",
+            (row["id"],),
+        ).fetchall()
+        result.append(_release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL))
+    return result
+
+
 @app.get("/v1/app/update/latest")
 def latest_app_update(
     target: str | None = Query(default=None),
     arch: str | None = Query(default=None),
     current_version: str | None = Query(default=None),
 ) -> dict:
-    """Return the signed Tauri update manifest for the latest public release."""
+    """Return the signed Tauri updater manifest managed by the admin console."""
     del target, arch, current_version
-    if not UPDATE_GITHUB_REPOSITORY or "/" not in UPDATE_GITHUB_REPOSITORY:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="版本发布源未配置")
-    release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
-    platforms = _update_platforms(release)
-    if not platforms:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前发布没有可用的更新包")
-    return {
-        "version": str(release.get("tag_name", "")).removeprefix("v"),
-        "notes": release.get("body") or "GoYou 新版本",
-        "pub_date": release.get("published_at") or release.get("created_at"),
-        "platforms": platforms,
-    }
+    with db() as connection:
+        rows = connection.execute("SELECT * FROM app_releases WHERE status = 'published'").fetchall()
+        candidates = []
+        for row in rows:
+            assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (row["id"],)).fetchall()
+            platforms = {asset["platform"] for asset in assets}
+            if all(platform in platforms for platform in UPDATE_PLATFORMS):
+                candidates.append((row, assets))
+        if candidates:
+            row, assets = max(candidates, key=lambda item: _version_key(item[0]["version"]))
+            payload = _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
+            return {"version": payload["version"], "notes": payload["notes"], "pub_date": payload["published_at"] or payload["created_at"], "platforms": payload["platforms"]}
+
+    # Keep an optional compatibility fallback for installations that have not
+    # created their first managed release yet.
+    if UPDATE_GITHUB_REPOSITORY and "/" in UPDATE_GITHUB_REPOSITORY:
+        release = _github_json(f"https://api.github.com/repos/{UPDATE_GITHUB_REPOSITORY}/releases/latest")
+        platforms = _update_platforms(release)
+        if platforms:
+            return {
+                "version": str(release.get("tag_name", "")).removeprefix("v"),
+                "notes": release.get("body") or "GoYou 新版本",
+                "pub_date": release.get("published_at") or release.get("created_at"),
+                "platforms": platforms,
+            }
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前没有可用的更新版本")
+
+
+@app.get("/v1/app/update/assets/{version}/{platform}")
+def download_update_asset(version: str, platform: str) -> FileResponse:
+    if platform not in UPDATE_PLATFORMS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="更新平台不存在")
+    with db() as connection:
+        asset = connection.execute(
+            """SELECT a.storage_path, a.filename FROM app_release_assets a
+               JOIN app_releases r ON r.id = a.release_id
+               WHERE r.version = ? AND r.status = 'published' AND a.platform = ?""",
+            (version, platform),
+        ).fetchone()
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="更新文件不存在")
+    path = Path(asset["storage_path"]).resolve()
+    storage_root = UPDATE_STORAGE_DIR.resolve()
+    if storage_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="更新文件不存在")
+    return FileResponse(path, filename=asset["filename"], media_type="application/octet-stream")
 
 
 @app.post("/v1/auth/register", status_code=status.HTTP_201_CREATED)
@@ -771,6 +896,191 @@ def admin_me(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
 
 @app.post("/v1/admin/auth/logout")
 def admin_logout(admin: Annotated[dict[str, str], Depends(current_admin)]) -> None:
+    return None
+
+
+def _release_or_404(connection: sqlite3.Connection, release_id: str) -> sqlite3.Row:
+    row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="版本不存在")
+    return row
+
+
+def _asset_filename(platform: str, filename: str | None) -> str:
+    name = Path(filename or "").name
+    if not name or name in {".", ".."}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请上传有效的更新文件")
+    if platform == "windows-x86_64" and not name.endswith(".nsis.zip"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Windows 更新包必须是 .nsis.zip 文件")
+    if platform.startswith("darwin-") and not name.endswith(".app.tar.gz"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="macOS 更新包必须是 .app.tar.gz 文件")
+    return name
+
+
+async def _store_upload(upload: UploadFile, destination: Path) -> tuple[int, str]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.uploading")
+    total = 0
+    digest = hashlib.sha256()
+    try:
+        with temporary.open("wb") as handle:
+            while chunk := await upload.read(1024 * 1024):
+                total += len(chunk)
+                if total > UPDATE_MAX_ASSET_BYTES:
+                    raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="更新文件超过大小限制")
+                digest.update(chunk)
+                handle.write(chunk)
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        await upload.close()
+    return total, digest.hexdigest()
+
+
+@app.get("/v1/admin/releases")
+def admin_releases(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
+    with db() as connection:
+        items = _release_rows(connection)
+    items.sort(key=lambda item: (_version_key(item["version"]), item["created_at"]), reverse=True)
+    return {"items": items}
+
+
+@app.post("/v1/admin/releases", status_code=status.HTTP_201_CREATED)
+def admin_create_release(
+    payload: AdminReleaseCreateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    version = payload.version.removeprefix("v")
+    release_id = secrets.token_hex(16)
+    created_at = iso(now())
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO app_releases(id, version, notes, status, created_at) VALUES (?, ?, ?, 'draft', ?)",
+                (release_id, version, payload.notes.strip(), created_at),
+            )
+            row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该版本已经存在") from None
+    return _release_payload(row, [], base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.patch("/v1/admin/releases/{release_id}")
+def admin_update_release(
+    release_id: str,
+    payload: AdminReleaseUpdateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    with db() as connection:
+        row = _release_or_404(connection, release_id)
+        if row["status"] != "draft":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能修改，请先撤回")
+        connection.execute("UPDATE app_releases SET notes = ? WHERE id = ?", (payload.notes.strip(), release_id))
+        row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+        assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+    return _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.post("/v1/admin/releases/{release_id}/assets/{platform}")
+async def admin_upload_release_asset(
+    release_id: str,
+    platform: str,
+    artifact: Annotated[UploadFile, File(...)],
+    signature: Annotated[UploadFile, File(...)],
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    if platform not in UPDATE_PLATFORMS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不支持的更新平台")
+    artifact_name = _asset_filename(platform, artifact.filename)
+    signature_name = Path(signature.filename or "").name
+    if not signature_name.endswith(".sig"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="签名文件必须是 .sig 文件")
+    with db() as connection:
+        release = _release_or_404(connection, release_id)
+        if release["status"] != "draft":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能替换文件，请先撤回")
+        old_asset = connection.execute("SELECT storage_path FROM app_release_assets WHERE release_id = ? AND platform = ?", (release_id, platform)).fetchone()
+    destination = UPDATE_STORAGE_DIR.resolve() / release_id / platform / artifact_name
+    try:
+        signature_bytes = await signature.read(1024 * 1024 + 1)
+        if len(signature_bytes) > 1024 * 1024:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="签名文件超过大小限制")
+        signature_text = signature_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="签名文件不是有效文本") from None
+    finally:
+        await signature.close()
+    if not signature_text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="签名文件不能为空")
+    size_bytes, sha256 = await _store_upload(artifact, destination)
+    try:
+        with db() as connection:
+            current_release = _release_or_404(connection, release_id)
+            if current_release["status"] != "draft":
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能替换文件，请先撤回")
+            connection.execute(
+                """INSERT INTO app_release_assets(release_id, platform, filename, storage_path, signature, size_bytes, sha256, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(release_id, platform) DO UPDATE SET filename = excluded.filename,
+                   storage_path = excluded.storage_path, signature = excluded.signature,
+                   size_bytes = excluded.size_bytes, sha256 = excluded.sha256, created_at = excluded.created_at""",
+                (release_id, platform, artifact_name, str(destination), signature_text, size_bytes, sha256, iso(now())),
+            )
+            row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+            assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    if old_asset and old_asset["storage_path"] != str(destination):
+        Path(old_asset["storage_path"]).unlink(missing_ok=True)
+    return _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.post("/v1/admin/releases/{release_id}/publish")
+def admin_publish_release(release_id: str, admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
+    with db() as connection:
+        release = _release_or_404(connection, release_id)
+        assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+        missing = [
+            platform for platform in UPDATE_PLATFORMS
+            if not any(asset["platform"] == platform and Path(asset["storage_path"]).is_file() for asset in assets)
+        ]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"请先上传更新包：{', '.join(missing)}")
+        published_at = iso(now())
+        connection.execute("UPDATE app_releases SET status = 'published', published_at = ? WHERE id = ?", (published_at, release_id))
+        row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+    return _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.post("/v1/admin/releases/{release_id}/unpublish")
+def admin_unpublish_release(release_id: str, admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
+    with db() as connection:
+        _release_or_404(connection, release_id)
+        connection.execute("UPDATE app_releases SET status = 'draft', published_at = NULL WHERE id = ?", (release_id,))
+        row = connection.execute("SELECT * FROM app_releases WHERE id = ?", (release_id,)).fetchone()
+        assets = connection.execute("SELECT * FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+    return _release_payload(row, assets, base_url=UPDATE_PUBLIC_BASE_URL)
+
+
+@app.delete("/v1/admin/releases/{release_id}")
+def admin_delete_release(release_id: str, admin: Annotated[dict[str, str], Depends(current_admin)]) -> None:
+    with db() as connection:
+        release = _release_or_404(connection, release_id)
+        if release["status"] != "draft":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能删除，请先撤回")
+        paths = connection.execute("SELECT storage_path FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
+        connection.execute("DELETE FROM app_releases WHERE id = ?", (release_id,))
+    for path in paths:
+        Path(path["storage_path"]).unlink(missing_ok=True)
+    release_dir = UPDATE_STORAGE_DIR.resolve() / release_id
+    if release_dir.exists():
+        try:
+            release_dir.rmdir()
+        except OSError:
+            pass
     return None
 
 

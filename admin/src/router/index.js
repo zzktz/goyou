@@ -7,6 +7,7 @@ import UsersPage from '@/pages/UsersPage.vue'
 import LeasesPage from '@/pages/LeasesPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import TrafficLogsPage from '@/pages/TrafficLogsPage.vue'
+import ReleasesPage from '@/pages/ReleasesPage.vue'
 
 const router = createRouter({
   history: createWebHistory('/admin/'),
@@ -21,6 +22,7 @@ const router = createRouter({
         { path: 'users', component: UsersPage, meta: { title: '用户管理' } },
         { path: 'leases', component: LeasesPage, meta: { title: '代理租约' } },
         { path: 'traffic-logs', component: TrafficLogsPage, meta: { title: '流量日志' } },
+        { path: 'releases', component: ReleasesPage, meta: { title: '版本发布' } },
         { path: 'settings', component: SettingsPage, meta: { title: '系统设置' } },
       ],
     },
