@@ -59,6 +59,7 @@ pub struct ProxyLease {
 pub struct Status {
     pub state: String,
     pub tunnel_running: bool,
+    pub local_port: u16,
     pub port_listening: bool,
     pub system_proxy_enabled: bool,
     pub proxy_enabled: bool,
@@ -852,6 +853,7 @@ fn status() -> Status {
         }
         .into(),
         tunnel_running: running,
+        local_port: PORT,
         port_listening: listening,
         system_proxy_enabled: system_proxy_enabled(),
         proxy_enabled: p.proxy_enabled,

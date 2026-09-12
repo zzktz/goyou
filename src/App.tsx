@@ -23,6 +23,7 @@ import type { AuthSession, UsageSummary } from "./auth";
 interface Status {
   state: "on" | "off" | "error";
   tunnelRunning: boolean;
+  localPort: number;
   portListening: boolean;
   systemProxyEnabled: boolean;
   proxyEnabled: boolean;
@@ -813,7 +814,7 @@ function Dashboard({
                   <span
                     className={`proxy-status-value ${detailStatusTone(status.portListening)}`}
                   >
-                    {status.portListening ? "正在监听" : "未监听"}
+                    {status.portListening ? status.localPort : "未监听"}
                   </span>
                 </div>
                 <div className="proxy-status-item">
