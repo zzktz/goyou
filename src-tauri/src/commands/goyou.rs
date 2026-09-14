@@ -71,6 +71,7 @@ pub struct Status {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
+    pub proxy_running: bool,
     pub github_reachable: bool,
     pub latency_ms: u64,
     pub github_status: Option<u16>,
@@ -1114,6 +1115,7 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let s = status();
     if !s.tunnel_running {
         return Diagnostic {
+            proxy_running: false,
             github_reachable: false,
             latency_ms: 0,
             github_status: None,
@@ -1215,6 +1217,7 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let configured = proxies.iter().any(|v| !v.is_empty());
     let matches = proxies.iter().any(|v| v.contains("127.0.0.1:7890"));
     Diagnostic {
+        proxy_running: true,
         github_reachable,
         latency_ms,
         github_status,

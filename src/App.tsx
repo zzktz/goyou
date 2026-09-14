@@ -35,6 +35,7 @@ interface Status {
 }
 
 interface Diagnostic {
+  proxyRunning: boolean;
   githubReachable: boolean;
   latencyMs: number;
   githubStatus: number | null;
@@ -358,6 +359,7 @@ function Dashboard({
         "【自动网络问题收集】",
         `应用版本：v${appPackage.version}`,
         `收集时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+        `代理运行状态：${result.proxyRunning ? "运行中" : "未运行"}`,
         `GitHub：${result.githubReachable ? `可达（${result.latencyMs} ms，HTTP ${result.githubStatus ?? "?"}）` : "不可达"}`,
         `Google：${result.googleReachable ? `可达（${result.googleLatencyMs} ms，HTTP ${result.googleStatus ?? "?"}）` : "不可达"}`,
         `Git 代理：${result.gitProxyMatchesTunnel ? "已指向本地代理" : result.gitProxyConfigured ? "使用其他代理" : "未配置"}`,
@@ -699,9 +701,15 @@ function Dashboard({
           : `${reachability}；${result.analysis}${diagnosticError ? `；${diagnosticError}` : ""}`,
         result.githubReachable && result.googleReachable ? "normal" : "warning",
       );
-      if (!result.githubReachable || !result.googleReachable) {
+      if (
+        result.proxyRunning &&
+        (!result.githubReachable || !result.googleReachable)
+      ) {
         setDiagnosticResult(result);
         setDiagnosticConsentOpen(true);
+      } else {
+        setDiagnosticResult(null);
+        setDiagnosticConsentOpen(false);
       }
     } catch (error) {
       setInfoMessage(String(error), "warning");
