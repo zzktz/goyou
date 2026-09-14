@@ -16,7 +16,7 @@ const expiryUser = ref(null)
 const expiryDate = ref('')
 const createOpen = ref(false)
 const createSaving = ref(false)
-const createForm = reactive({ email: '', name: '', password: '', account_expires_at: '', daily_quota_mb: 500 })
+const createForm = reactive({ email: '', name: '', password: '', account_expires_at: '', daily_quota_mb: 1000 })
 const filters = reactive({ keyword: '', state: undefined })
 const pagination = reactive({ current: 1, pageSize: 20, total: 0, showSizeChanger: true, showTotal: total => `共 ${total} 个用户` })
 
@@ -52,7 +52,7 @@ function openExpiry(record) {
   expiryOpen.value = true
 }
 function openCreate() {
-  Object.assign(createForm, { email: '', name: '', password: '', account_expires_at: '', daily_quota_mb: 500 })
+  Object.assign(createForm, { email: '', name: '', password: '', account_expires_at: '', daily_quota_mb: 1000 })
   createOpen.value = true
 }
 async function saveCreate() {

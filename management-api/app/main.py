@@ -46,7 +46,7 @@ RELAY_PORT_START = int(os.getenv("RELAY_PORT_START", "30000"))
 RELAY_PORT_END = int(os.getenv("RELAY_PORT_END", "39999"))
 RELAY_METHOD = os.getenv("RELAY_METHOD", "chacha20-ietf-poly1305")
 RELAY_PASSWORD = os.getenv("RELAY_PASSWORD", "")
-DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "500000000"))
+DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "1000000000"))
 DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
 METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
@@ -239,7 +239,7 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS user_quotas (
                 user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-                daily_limit_bytes INTEGER NOT NULL DEFAULT 500000000,
+                daily_limit_bytes INTEGER NOT NULL DEFAULT 1000000000,
                 timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
                 updated_at TEXT NOT NULL
             );
