@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -52,6 +53,9 @@ METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
 UPDATE_GITHUB_REPOSITORY = os.getenv("UPDATE_GITHUB_REPOSITORY", "zzktz/goyou").strip()
 UPDATE_STORAGE_DIR = Path(os.getenv("UPDATE_STORAGE_DIR", str(DB_PATH.parent / "updates")))
 UPDATE_MAX_ASSET_BYTES = int(os.getenv("UPDATE_MAX_ASSET_BYTES", "2000000000"))
+FEEDBACK_STORAGE_DIR = Path(os.getenv("FEEDBACK_STORAGE_DIR", str(DB_PATH.parent / "feedback")))
+FEEDBACK_MAX_IMAGES = 3
+FEEDBACK_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 UPDATE_PLATFORMS = ("windows-x86_64", "darwin-aarch64", "darwin-x86_64")
 UPDATE_PUBLIC_BASE_URL = os.getenv("UPDATE_PUBLIC_BASE_URL", "https://proxy.123371.com").rstrip("/")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
@@ -285,10 +289,31 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (release_id, platform)
             );
+            CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                reply TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                replied_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS feedback_attachments (
+                id TEXT PRIMARY KEY,
+                feedback_id TEXT NOT NULL REFERENCES feedback(id) ON DELETE CASCADE,
+                filename TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_reported_at ON usage_reports(reported_at);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_user_id ON usage_reports(user_id);
             CREATE INDEX IF NOT EXISTS idx_app_releases_status ON app_releases(status, published_at);
+            CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback(status, created_at DESC);
             """
         )
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
@@ -370,6 +395,20 @@ class LeaseRequest(BaseModel):
 
 class LeaseRefreshRequest(BaseModel):
     lease_id: str = Field(min_length=8, max_length=100)
+
+
+class FeedbackScreenshotRequest(BaseModel):
+    filename: str = Field(default="screenshot", max_length=255)
+    data: str = Field(min_length=1, max_length=7_000_000)
+
+
+class FeedbackCreateRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=5000)
+    screenshots: list[FeedbackScreenshotRequest] = Field(default_factory=list, max_length=FEEDBACK_MAX_IMAGES)
+
+
+class AdminFeedbackReplyRequest(BaseModel):
+    reply: str = Field(min_length=1, max_length=5000)
 
 
 class AdminLoginRequest(BaseModel):
@@ -501,6 +540,58 @@ def verify_admin_password(password: str) -> bool:
         except (VerifyMismatchError, VerificationError, InvalidHashError):
             return False
     return bool(ADMIN_PASSWORD) and secrets.compare_digest(password, ADMIN_PASSWORD)
+
+
+def _decode_feedback_image(encoded: str) -> tuple[bytes, str, str]:
+    """Decode and verify a browser-provided screenshot before storing it."""
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="截图数据无效") from error
+    if not content:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="截图不能为空")
+    if len(content) > FEEDBACK_MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="单张截图不能超过 5 MiB")
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return content, "image/png", ".png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return content, "image/jpeg", ".jpg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return content, "image/webp", ".webp"
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="仅支持 PNG、JPEG 或 WebP 截图")
+
+
+def _feedback_attachment_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "filename": row["filename"],
+        "content_type": row["content_type"],
+        "size_bytes": int(row["size_bytes"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _feedback_payload(row: sqlite3.Row, attachments: list[sqlite3.Row], *, include_user: bool = False) -> dict:
+    payload = {
+        "id": row["id"],
+        "message": row["message"],
+        "status": row["status"],
+        "reply": row["reply"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "replied_at": row["replied_at"],
+        "attachments": [_feedback_attachment_payload(attachment) for attachment in attachments],
+    }
+    if include_user:
+        payload["user"] = {"id": row["user_id"], "name": row["name"], "email": row["email"]}
+    return payload
+
+
+def _feedback_attachments(connection: sqlite3.Connection, feedback_id: str) -> list[sqlite3.Row]:
+    return connection.execute(
+        "SELECT id, filename, content_type, size_bytes, created_at FROM feedback_attachments WHERE feedback_id = ? ORDER BY created_at ASC",
+        (feedback_id,),
+    ).fetchall()
 
 
 app = FastAPI(title=APP_NAME, version="0.1.0")
@@ -798,6 +889,58 @@ def today_usage(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
     payload["account_expires_at"] = account_expiry_date(user["account_expires_at"])
     payload["account_expired"] = account_is_expired(user["account_expires_at"])
     return payload
+
+
+@app.get("/v1/feedback")
+def user_feedback(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM feedback WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+            (user["id"],),
+        ).fetchall()
+        return {"items": [_feedback_payload(row, _feedback_attachments(connection, row["id"])) for row in rows]}
+
+
+@app.post("/v1/feedback", status_code=status.HTTP_201_CREATED)
+def create_feedback(payload: FeedbackCreateRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
+    message = payload.message.strip()
+    if not message:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="请填写反馈内容")
+    feedback_id = secrets.token_hex(16)
+    created_at = iso(now())
+    saved: list[tuple[str, Path, str, str, int]] = []
+    try:
+        for screenshot in payload.screenshots:
+            content, content_type, extension = _decode_feedback_image(screenshot.data)
+            attachment_id = secrets.token_hex(16)
+            destination = FEEDBACK_STORAGE_DIR.resolve() / feedback_id / f"{attachment_id}{extension}"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            filename = Path(screenshot.filename).name.strip()[:255] or f"screenshot{extension}"
+            saved.append((attachment_id, destination, filename, content_type, len(content)))
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO feedback(id, user_id, message, status, created_at, updated_at) VALUES (?, ?, ?, 'open', ?, ?)",
+                (feedback_id, user["id"], message, created_at, created_at),
+            )
+            for attachment_id, destination, filename, content_type, size_bytes in saved:
+                connection.execute(
+                    """INSERT INTO feedback_attachments(id, feedback_id, filename, storage_path, content_type, size_bytes, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (attachment_id, feedback_id, filename, str(destination), content_type, size_bytes, created_at),
+                )
+            row = connection.execute("SELECT * FROM feedback WHERE id = ?", (feedback_id,)).fetchone()
+            attachments = _feedback_attachments(connection, feedback_id)
+    except Exception:
+        for _, destination, _, _, _ in saved:
+            destination.unlink(missing_ok=True)
+        feedback_dir = FEEDBACK_STORAGE_DIR.resolve() / feedback_id
+        try:
+            feedback_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return _feedback_payload(row, attachments)
 
 
 @app.post("/v1/devices/register")
@@ -1360,6 +1503,86 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
         "active_refresh_tokens": refresh_tokens,
         "generated_at": iso(now()),
     }
+
+
+@app.get("/v1/admin/feedback")
+def admin_feedback(
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    status_filter: str = Query(default="", alias="status", pattern="^(|open|replied)$"),
+    keyword: str = Query(default="", max_length=255),
+) -> dict:
+    conditions = ["1 = 1"]
+    params: list[str | int] = []
+    if status_filter:
+        conditions.append("f.status = ?")
+        params.append(status_filter)
+    if keyword.strip():
+        term = f"%{keyword.strip()}%"
+        conditions.append("(f.message LIKE ? OR u.name LIKE ? OR u.email LIKE ?)")
+        params.extend([term, term, term])
+    where = " AND ".join(conditions)
+    offset = (page - 1) * page_size
+    with db() as connection:
+        total = connection.execute(
+            f"SELECT COUNT(*) FROM feedback f JOIN users u ON u.id = f.user_id WHERE {where}", params
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""SELECT f.*, u.name, u.email FROM feedback f JOIN users u ON u.id = f.user_id
+                WHERE {where} ORDER BY CASE f.status WHEN 'open' THEN 0 ELSE 1 END, f.updated_at DESC
+                LIMIT ? OFFSET ?""",
+            [*params, page_size, offset],
+        ).fetchall()
+        items = [_feedback_payload(row, _feedback_attachments(connection, row["id"]), include_user=True) for row in rows]
+    return {"items": items, "pagination": {"page": page, "page_size": page_size, "total": total}}
+
+
+@app.post("/v1/admin/feedback/{feedback_id}/reply")
+def admin_reply_feedback(
+    feedback_id: str,
+    payload: AdminFeedbackReplyRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    reply = payload.reply.strip()
+    if not reply:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="请填写回复内容")
+    replied_at = iso(now())
+    with db() as connection:
+        cursor = connection.execute(
+            """UPDATE feedback SET reply = ?, status = 'replied', replied_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (reply, replied_at, replied_at, feedback_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="反馈不存在")
+        row = connection.execute(
+            "SELECT f.*, u.name, u.email FROM feedback f JOIN users u ON u.id = f.user_id WHERE f.id = ?",
+            (feedback_id,),
+        ).fetchone()
+        attachments = _feedback_attachments(connection, feedback_id)
+    return _feedback_payload(row, attachments, include_user=True)
+
+
+@app.get("/v1/admin/feedback/{feedback_id}/attachments/{attachment_id}")
+def admin_feedback_attachment(
+    feedback_id: str,
+    attachment_id: str,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> FileResponse:
+    with db() as connection:
+        attachment = connection.execute(
+            """SELECT storage_path, filename, content_type FROM feedback_attachments
+               WHERE id = ? AND feedback_id = ?""",
+            (attachment_id, feedback_id),
+        ).fetchone()
+    if not attachment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="截图不存在")
+    path = Path(attachment["storage_path"]).resolve()
+    storage_root = FEEDBACK_STORAGE_DIR.resolve()
+    if storage_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="截图不存在")
+    return FileResponse(path, filename=attachment["filename"], media_type=attachment["content_type"])
 
 
 @app.get("/v1/admin/users")

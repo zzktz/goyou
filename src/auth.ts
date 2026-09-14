@@ -42,6 +42,30 @@ export interface UsageSummary {
   account_expired?: boolean;
 }
 
+export interface FeedbackScreenshot {
+  filename: string;
+  data: string;
+}
+
+export interface FeedbackAttachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface FeedbackItem {
+  id: string;
+  message: string;
+  status: "open" | "replied";
+  reply: string | null;
+  created_at: string;
+  updated_at: string;
+  replied_at: string | null;
+  attachments: FeedbackAttachment[];
+}
+
 interface AuthResponse {
   access_token: string;
   refresh_token: string;
@@ -206,6 +230,28 @@ export async function getTodayUsage(
 ): Promise<UsageSummary> {
   return invoke<UsageSummary>("get_goyou_usage", {
     accessToken: session.token,
+  });
+}
+
+export async function getFeedback(
+  session: AuthSession,
+): Promise<FeedbackItem[]> {
+  const response = await request<{ items: FeedbackItem[] }>("/v1/feedback", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${session.token}` },
+  });
+  return response.items;
+}
+
+export async function createFeedback(
+  session: AuthSession,
+  message: string,
+  screenshots: FeedbackScreenshot[],
+): Promise<FeedbackItem> {
+  return request<FeedbackItem>("/v1/feedback", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ message, screenshots }),
   });
 }
 

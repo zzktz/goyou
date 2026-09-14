@@ -6,10 +6,12 @@ import {
   type Update,
 } from "@tauri-apps/plugin-updater";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import appPackage from "../package.json";
 import {
   clearRememberedLogin,
+  createFeedback,
+  getFeedback,
   getSession,
   getRememberedLogin,
   getTodayUsage,
@@ -18,7 +20,7 @@ import {
   refreshSession,
   saveRememberedLogin,
 } from "./auth";
-import type { AuthSession, UsageSummary } from "./auth";
+import type { AuthSession, FeedbackItem, UsageSummary } from "./auth";
 
 interface Status {
   state: "on" | "off" | "error";
@@ -212,12 +214,20 @@ function Dashboard({
   const [busyAction, setBusyAction] = useState<
     "enable" | "disable" | "network" | null
   >(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [feedbackFiles, setFeedbackFiles] = useState<File[]>([]);
+  const [feedbackItems, setFeedbackItems] = useState<FeedbackItem[]>([]);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [message, setMessage] = useState("尚未检测网络连通性");
   const [messageTone, setMessageTone] = useState<MessageTone>("normal");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [hasAvailableUpdate, setHasAvailableUpdate] = useState(false);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [updateState, setUpdateState] = useState<
     | "idle"
@@ -236,6 +246,7 @@ function Dashboard({
   const accountExpiryHandled = useRef(false);
   const currentSession = useRef(session);
   const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
 
   const setInfoMessage = useCallback(
     (nextMessage: string, tone: MessageTone = "normal") => {
@@ -245,9 +256,102 @@ function Dashboard({
     [],
   );
 
+  const loadFeedback = useCallback(async () => {
+    try {
+      setFeedbackItems(await getFeedback(currentSession.current));
+    } catch (error) {
+      setFeedbackError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  const openFeedback = () => {
+    setAccountMenuOpen(false);
+    setFeedbackError(null);
+    setShowFeedback(true);
+    void loadFeedback();
+  };
+
+  const selectFeedbackScreenshots = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!files.length) return;
+    const accepted = files.filter(
+      (file) =>
+        ["image/png", "image/jpeg", "image/webp"].includes(file.type) &&
+        file.size <= 5 * 1024 * 1024,
+    );
+    if (accepted.length !== files.length) {
+      setFeedbackError("仅支持 PNG、JPEG、WebP 图片，单张不能超过 5 MiB。");
+    }
+    setFeedbackFiles((current) => {
+      const next = [...current, ...accepted].slice(0, 3);
+      if (current.length + accepted.length > 3) {
+        setFeedbackError("最多可添加 3 张截图。");
+      }
+      return next;
+    });
+  };
+
+  const submitFeedback = async () => {
+    const message = feedbackText.trim();
+    if (!message) {
+      setFeedbackError("请描述你遇到的问题。");
+      return;
+    }
+    setFeedbackBusy(true);
+    setFeedbackError(null);
+    try {
+      const screenshots = await Promise.all(
+        feedbackFiles.map(
+          (file) =>
+            new Promise<{ filename: string; data: string }>(
+              (resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () =>
+                  reject(new Error(`无法读取截图：${file.name}`));
+                reader.onload = () => {
+                  const dataUrl = String(reader.result ?? "");
+                  const [, data = ""] = dataUrl.split(",", 2);
+                  resolve({ filename: file.name, data });
+                };
+                reader.readAsDataURL(file);
+              },
+            ),
+        ),
+      );
+      await createFeedback(currentSession.current, message, screenshots);
+      setFeedbackText("");
+      setFeedbackFiles([]);
+      await loadFeedback();
+      setInfoMessage("问题反馈已提交，我们会尽快回复。");
+    } catch (error) {
+      setFeedbackError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFeedbackBusy(false);
+    }
+  };
+
   useEffect(() => {
     currentSession.current = session;
   }, [session]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (!accountMenuRef.current?.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePress);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnOutsidePress);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [accountMenuOpen]);
 
   const refreshAuthenticatedSession = useCallback(
     (activeSession: AuthSession = currentSession.current) => {
@@ -582,10 +686,12 @@ function Dashboard({
       const nextUpdate = await check({ timeout: 15_000 });
       if (!nextUpdate) {
         setAvailableUpdate(null);
+        setHasAvailableUpdate(false);
         setUpdateState("latest");
         return;
       }
       setAvailableUpdate(nextUpdate);
+      setHasAvailableUpdate(true);
       setUpdateState("available");
     } catch (error) {
       setUpdateState("error");
@@ -600,6 +706,22 @@ function Dashboard({
     setUpdateState("idle");
     setUpdateError(null);
   };
+  useEffect(() => {
+    let cancelled = false;
+    void check({ timeout: 15_000 })
+      .then(async (update) => {
+        if (cancelled) {
+          await update?.close().catch(() => undefined);
+          return;
+        }
+        setHasAvailableUpdate(Boolean(update));
+        await update?.close().catch(() => undefined);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const installUpdate = async () => {
     if (!availableUpdate) return;
     setBusy(true);
@@ -707,27 +829,57 @@ function Dashboard({
                 type="button"
               >
                 v{appPackage.version}
+                {hasAvailableUpdate && (
+                  <span
+                    aria-label="有新版本可更新"
+                    className="update-available-dot"
+                    role="img"
+                  />
+                )}
               </button>
             </div>
           </div>
           <div className="member-info">
-            <div className="account-menu">
+            <div className="account-menu" ref={accountMenuRef}>
               <span
-                aria-label={`${session.user.name}，${session.user.email}`}
-                className="account-avatar logout-avatar"
-                data-tooltip={`${session.user.name} · ${session.user.email}`}
-                title={`${session.user.name} · ${session.user.email}`}
+                aria-hidden="true"
+                className="account-avatar virtual-avatar"
               >
-                {session.user.name.slice(0, 1).toUpperCase()}
+                <i />
+                <b />
               </span>
               <button
-                className="logout-button"
-                onClick={() => setShowLogoutConfirm(true)}
-                disabled={busy}
+                aria-expanded={accountMenuOpen}
+                aria-haspopup="menu"
+                className="account-name-button"
+                onClick={() => setAccountMenuOpen((open) => !open)}
                 type="button"
               >
-                退出
+                {session.user.name}
+                <span aria-hidden="true" className="account-menu-chevron" />
               </button>
+              {accountMenuOpen && (
+                <div
+                  aria-label="账户菜单"
+                  className="account-dropdown"
+                  role="menu"
+                >
+                  <button onClick={openFeedback} role="menuitem" type="button">
+                    问题反馈
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      setShowLogoutConfirm(true);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    退出登录
+                  </button>
+                </div>
+              )}
             </div>
             <p className="lease-summary">
               有效期至 {formatAccountExpiry(session.user.account_expires_at)}
@@ -891,6 +1043,111 @@ function Dashboard({
               >
                 {busy && <span className="button-spinner" />}
                 {busy ? "处理中…" : "确定"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {showFeedback && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="feedback-dialog-title"
+            aria-modal="true"
+            className="confirm-dialog feedback-dialog"
+            role="dialog"
+          >
+            <div className="feedback-dialog-heading">
+              <h2 id="feedback-dialog-title">问题反馈</h2>
+              <button
+                aria-label="关闭问题反馈"
+                className="feedback-close-button"
+                disabled={feedbackBusy}
+                onClick={() => setShowFeedback(false)}
+                title="关闭"
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <p className="feedback-dialog-intro">
+              描述问题，可附最多 3 张截图。
+            </p>
+            <textarea
+              aria-label="问题描述"
+              className="feedback-textarea"
+              disabled={feedbackBusy}
+              maxLength={5000}
+              onChange={(event) => setFeedbackText(event.target.value)}
+              placeholder="例如：开启代理后无法访问某个网站，并说明出现的提示…"
+              rows={3}
+              value={feedbackText}
+            />
+            <div className="feedback-upload-row">
+              <label className="feedback-upload-button">
+                添加截图
+                <input
+                  accept="image/png,image/jpeg,image/webp"
+                  disabled={feedbackBusy || feedbackFiles.length >= 3}
+                  multiple
+                  onChange={selectFeedbackScreenshots}
+                  type="file"
+                />
+              </label>
+              <small>{feedbackFiles.length}/3 张，单张最大 5 MiB</small>
+            </div>
+            {feedbackFiles.length > 0 && (
+              <ul className="feedback-files">
+                {feedbackFiles.map((file, index) => (
+                  <li key={`${file.name}-${file.lastModified}`}>
+                    <span>{file.name}</span>
+                    <button
+                      aria-label={`移除 ${file.name}`}
+                      disabled={feedbackBusy}
+                      onClick={() =>
+                        setFeedbackFiles((files) =>
+                          files.filter((_, itemIndex) => itemIndex !== index),
+                        )
+                      }
+                      type="button"
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {feedbackError && <p className="feedback-error">{feedbackError}</p>}
+            {feedbackItems.length > 0 && (
+              <div className="feedback-history">
+                <strong>我的反馈</strong>
+                {feedbackItems.slice(0, 5).map((item) => (
+                  <article key={item.id} className="feedback-history-item">
+                    <p>{item.message}</p>
+                    <small>
+                      {new Date(item.created_at).toLocaleString("zh-CN", {
+                        month: "numeric",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                      {item.status === "replied" ? " · 已回复" : " · 待回复"}
+                    </small>
+                    {item.reply && (
+                      <div className="feedback-reply">回复：{item.reply}</div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+            <div className="confirm-actions">
+              <button
+                className="confirm-button feedback-submit-button"
+                disabled={feedbackBusy}
+                onClick={() => void submitFeedback()}
+                type="button"
+              >
+                {feedbackBusy && <span className="button-spinner" />}
+                {feedbackBusy ? "提交中…" : "提交反馈"}
               </button>
             </div>
           </section>
