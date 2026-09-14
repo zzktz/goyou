@@ -73,8 +73,15 @@ pub struct Status {
 pub struct Diagnostic {
     pub github_reachable: bool,
     pub latency_ms: u64,
+    pub github_status: Option<u16>,
+    pub google_reachable: bool,
+    pub google_latency_ms: u64,
+    pub google_status: Option<u16>,
     pub git_proxy_configured: bool,
     pub git_proxy_matches_tunnel: bool,
+    pub system_proxy_enabled: bool,
+    pub proxy_mode: Option<String>,
+    pub analysis: String,
     pub error: Option<String>,
 }
 
@@ -1109,8 +1116,15 @@ pub async fn diagnose_goyou() -> Diagnostic {
         return Diagnostic {
             github_reachable: false,
             latency_ms: 0,
+            github_status: None,
+            google_reachable: false,
+            google_latency_ms: 0,
+            google_status: None,
             git_proxy_configured: false,
             git_proxy_matches_tunnel: false,
+            system_proxy_enabled: s.system_proxy_enabled,
+            proxy_mode: s.proxy_mode,
+            analysis: "本地代理进程未运行，无法通过代理检测站点。".into(),
             error: Some("本地代理进程未运行。".into()),
         };
     }
@@ -1122,18 +1136,74 @@ pub async fn diagnose_goyou() -> Diagnostic {
         .user_agent("GoYou/1.0")
         .timeout(Duration::from_secs(15))
         .build();
-    let started = Instant::now();
-    let github_outcome = match client {
-        Ok(c) => c
-            .head("https://github.com/")
-            .send()
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
+    let (github_outcome, latency_ms, google_outcome, google_latency_ms) = match client {
+        Ok(client) => {
+            let github_client = client.clone();
+            let github_request = async move {
+                let started = Instant::now();
+                let outcome = github_client
+                    .head("https://github.com/")
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|response| {
+                        let status = response.status();
+                        if status.is_success() || status.is_redirection() {
+                            Ok(status.as_u16())
+                        } else {
+                            Err(format!("HTTP {}", status.as_u16()))
+                        }
+                    });
+                (outcome, started.elapsed().as_millis() as u64)
+            };
+            let google_request = async move {
+                let started = Instant::now();
+                let outcome = client
+                    .get("https://www.google.com/generate_204")
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|response| {
+                        let status = response.status();
+                        if status.is_success() || status.is_redirection() {
+                            Ok(status.as_u16())
+                        } else {
+                            Err(format!("HTTP {}", status.as_u16()))
+                        }
+                    });
+                (outcome, started.elapsed().as_millis() as u64)
+            };
+            let ((github_outcome, latency_ms), (google_outcome, google_latency_ms)) =
+                tokio::join!(github_request, google_request);
+            (
+                github_outcome,
+                latency_ms,
+                google_outcome,
+                google_latency_ms,
+            )
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            (Err(detail.clone()), 0, Err(detail), 0)
+        }
     };
-    let github_reachable = github_outcome.is_ok();
-    let error = github_outcome.err();
+    let github_status = github_outcome.as_ref().ok().copied();
+    let google_status = google_outcome.as_ref().ok().copied();
+    let github_reachable = github_status.is_some();
+    let google_reachable = google_status.is_some();
+    let analysis = match (github_reachable, google_reachable) {
+        (true, true) => "GitHub 和 Google 均可达。".to_string(),
+        (true, false) => "GitHub 可达但 Google 不可达，可能是当前网络或代理节点对 Google 域名、DNS、区域线路有限制。".to_string(),
+        (false, true) => "Google 可达但 GitHub 不可达，可能是 GitHub 域名或代理节点线路受限。".to_string(),
+        (false, false) => "GitHub 和 Google 均不可达，优先检查本地代理进程、代理上游节点和 DNS 解析。".to_string(),
+    };
+    let errors = [
+        github_outcome.err().map(|error| format!("GitHub: {error}")),
+        google_outcome.err().map(|error| format!("Google: {error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let proxies: [String; 2] = ["http.proxy", "https.proxy"].map(|k| {
         Command::new("git")
             .args(["config", "--global", "--get", k])
@@ -1146,10 +1216,17 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let matches = proxies.iter().any(|v| v.contains("127.0.0.1:7890"));
     Diagnostic {
         github_reachable,
-        latency_ms: started.elapsed().as_millis() as u64,
+        latency_ms,
+        github_status,
+        google_reachable,
+        google_latency_ms,
+        google_status,
         git_proxy_configured: configured,
         git_proxy_matches_tunnel: matches,
-        error,
+        system_proxy_enabled: s.system_proxy_enabled,
+        proxy_mode: s.proxy_mode,
+        analysis,
+        error: (!errors.is_empty()).then(|| errors.join("；")),
     }
 }
 

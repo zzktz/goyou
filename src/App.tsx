@@ -37,8 +37,15 @@ interface Status {
 interface Diagnostic {
   githubReachable: boolean;
   latencyMs: number;
+  githubStatus: number | null;
+  googleReachable: boolean;
+  googleLatencyMs: number;
+  googleStatus: number | null;
   gitProxyConfigured: boolean;
   gitProxyMatchesTunnel: boolean;
+  systemProxyEnabled: boolean;
+  proxyMode: "sing-box" | "ssh" | null;
+  analysis: string;
   error: string | null;
 }
 
@@ -222,6 +229,11 @@ function Dashboard({
   const [feedbackItems, setFeedbackItems] = useState<FeedbackItem[]>([]);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [diagnosticResult, setDiagnosticResult] = useState<Diagnostic | null>(
+    null,
+  );
+  const [diagnosticConsentOpen, setDiagnosticConsentOpen] = useState(false);
+  const [diagnosticSubmitting, setDiagnosticSubmitting] = useState(false);
   const [message, setMessage] = useState("尚未检测网络连通性");
   const [messageTone, setMessageTone] = useState<MessageTone>("normal");
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -329,6 +341,39 @@ function Dashboard({
       setFeedbackError(error instanceof Error ? error.message : String(error));
     } finally {
       setFeedbackBusy(false);
+    }
+  };
+
+  const closeDiagnosticConsent = () => {
+    setDiagnosticConsentOpen(false);
+    setDiagnosticResult(null);
+  };
+
+  const submitDiagnosticReport = async () => {
+    if (!diagnosticResult) return;
+    setDiagnosticSubmitting(true);
+    try {
+      const result = diagnosticResult;
+      const report = [
+        "【自动网络问题收集】",
+        `应用版本：v${appPackage.version}`,
+        `收集时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+        `GitHub：${result.githubReachable ? `可达（${result.latencyMs} ms，HTTP ${result.githubStatus ?? "?"}）` : "不可达"}`,
+        `Google：${result.googleReachable ? `可达（${result.googleLatencyMs} ms，HTTP ${result.googleStatus ?? "?"}）` : "不可达"}`,
+        `Git 代理：${result.gitProxyMatchesTunnel ? "已指向本地代理" : result.gitProxyConfigured ? "使用其他代理" : "未配置"}`,
+        `系统代理：${result.systemProxyEnabled ? "已启用" : "未启用"}`,
+        `代理模式：${result.proxyMode ?? "无"}`,
+        `原因分析：${result.analysis}`,
+        `错误信息：${result.error ?? "无"}`,
+        `客户端环境：${navigator.userAgent}`,
+      ].join("\n");
+      await createFeedback(currentSession.current, report, []);
+      closeDiagnosticConsent();
+      setInfoMessage("问题检测结果已上传，感谢你的协助。");
+    } catch (error) {
+      setInfoMessage(`问题检测结果上传失败：${String(error)}`, "warning");
+    } finally {
+      setDiagnosticSubmitting(false);
     }
   };
 
@@ -636,7 +681,10 @@ function Dashboard({
     setBusyAction("network");
     try {
       const result = await invoke<Diagnostic>("diagnose_goyou");
-      const reachability = `GitHub ${result.githubReachable ? "可达" : "不可达"}`;
+      const reachability = [
+        `GitHub ${result.githubReachable ? "可达" : "不可达"}${result.githubReachable ? `（${result.latencyMs} ms）` : ""}`,
+        `Google ${result.googleReachable ? "可达" : "不可达"}${result.googleReachable ? `（${result.googleLatencyMs} ms）` : ""}`,
+      ].join("；");
       const gitProxyStatus = result.gitProxyMatchesTunnel
         ? "Git 已指向本地代理"
         : result.gitProxyConfigured
@@ -646,11 +694,15 @@ function Dashboard({
         ? "代理上游节点不可达，请稍后重试"
         : result.error;
       setInfoMessage(
-        result.githubReachable
-          ? `${reachability}；耗时 ${result.latencyMs} ms；${gitProxyStatus}`
-          : `${reachability}；${diagnosticError ?? "网络不可达"}`,
-        result.githubReachable ? "normal" : "warning",
+        result.githubReachable && result.googleReachable
+          ? `${reachability}；${gitProxyStatus}`
+          : `${reachability}；${result.analysis}${diagnosticError ? `；${diagnosticError}` : ""}`,
+        result.githubReachable && result.googleReachable ? "normal" : "warning",
       );
+      if (!result.githubReachable || !result.googleReachable) {
+        setDiagnosticResult(result);
+        setDiagnosticConsentOpen(true);
+      }
     } catch (error) {
       setInfoMessage(String(error), "warning");
     } finally {
@@ -1061,6 +1113,42 @@ function Dashboard({
               >
                 {busy && <span className="button-spinner" />}
                 {busy ? "处理中…" : "确定"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {diagnosticConsentOpen && diagnosticResult && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="diagnostic-consent-title"
+            aria-modal="true"
+            className="confirm-dialog diagnostic-dialog"
+            role="dialog"
+          >
+            <h2 id="diagnostic-consent-title">检测到网络异常</h2>
+            <p>
+              GitHub 或 Google
+              站点无法访问。是否上传网络检测结果，帮助我们分析问题？
+              仅上传检测状态、延迟和错误信息，不包含账号密码或代理凭据。
+            </p>
+            <div className="confirm-actions">
+              <button
+                className="cancel-button"
+                disabled={diagnosticSubmitting}
+                onClick={closeDiagnosticConsent}
+                type="button"
+              >
+                暂不上传
+              </button>
+              <button
+                className="confirm-button action-button"
+                disabled={diagnosticSubmitting}
+                onClick={() => void submitDiagnosticReport()}
+                type="button"
+              >
+                {diagnosticSubmitting && <span className="button-spinner" />}
+                {diagnosticSubmitting ? "上传中…" : "同意并上传"}
               </button>
             </div>
           </section>
