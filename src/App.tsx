@@ -141,9 +141,10 @@ function AuthPage({
           <h1 id="auth-title">用户登录</h1>
         </div>
         <form className="auth-form" onSubmit={(event) => void submit(event)}>
-          <label>
-            账号
+          <div className="auth-field">
+            <label htmlFor="login-email">账号</label>
             <input
+              id="login-email"
               autoComplete="email"
               inputMode="email"
               required
@@ -152,10 +153,11 @@ function AuthPage({
               onChange={(event) => setEmail(event.target.value)}
               placeholder="you@example.com"
             />
-          </label>
-          <label>
-            密码
+          </div>
+          <div className="auth-field">
+            <label htmlFor="login-password">密码</label>
             <input
+              id="login-password"
               autoComplete="current-password"
               required
               type="password"
@@ -163,7 +165,7 @@ function AuthPage({
               onChange={(event) => setPassword(event.target.value)}
               placeholder="至少 8 位字符"
             />
-          </label>
+          </div>
           <div className="form-row">
             <label className="remember-option">
               <input

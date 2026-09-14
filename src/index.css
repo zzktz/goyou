@@ -171,11 +171,14 @@ button:disabled {
   font-size: 13px;
   font-weight: 680;
 }
-.auth-form > label {
+.auth-field {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   align-items: center;
   column-gap: 12px;
+}
+.auth-field > label {
+  cursor: text;
 }
 .auth-form input {
   width: 100%;
@@ -184,6 +187,8 @@ button:disabled {
   border: 1px solid #d4dde6;
   border-radius: 9px;
   color: #172940;
+  caret-color: #172940;
+  cursor: text;
   outline: 0;
   padding: 13px 14px;
   background: #fbfcfd;
