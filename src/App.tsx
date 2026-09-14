@@ -246,6 +246,7 @@ function Dashboard({
   const accountExpiryHandled = useRef(false);
   const currentSession = useRef(session);
   const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
+  const updateCheckInFlight = useRef(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
   const setInfoMessage = useCallback(
@@ -672,10 +673,12 @@ function Dashboard({
     if (
       updateState === "checking" ||
       updateState === "downloading" ||
-      updateState === "installing"
+      updateState === "installing" ||
+      updateCheckInFlight.current
     ) {
       return;
     }
+    updateCheckInFlight.current = true;
     setUpdateDialogOpen(true);
     setUpdateState("checking");
     setUpdateProgress(0);
@@ -696,6 +699,8 @@ function Dashboard({
     } catch (error) {
       setUpdateState("error");
       setUpdateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      updateCheckInFlight.current = false;
     }
   };
   const closeUpdateDialog = async () => {
@@ -708,18 +713,31 @@ function Dashboard({
   };
   useEffect(() => {
     let cancelled = false;
-    void check({ timeout: 15_000 })
-      .then(async (update) => {
-        if (cancelled) {
-          await update?.close().catch(() => undefined);
-          return;
-        }
-        setHasAvailableUpdate(Boolean(update));
+    const checkForAvailableUpdate = async () => {
+      if (updateCheckInFlight.current) return;
+      updateCheckInFlight.current = true;
+      try {
+        const update = await check({ timeout: 15_000 });
+        if (!cancelled) setHasAvailableUpdate(Boolean(update));
         await update?.close().catch(() => undefined);
-      })
-      .catch(() => undefined);
+      } catch {
+        // Keep an existing update indicator visible when a transient check fails.
+      } finally {
+        updateCheckInFlight.current = false;
+      }
+    };
+    const checkWhenFocused = () => void checkForAvailableUpdate();
+
+    void checkForAvailableUpdate();
+    const interval = window.setInterval(
+      () => void checkForAvailableUpdate(),
+      5 * 60_000,
+    );
+    window.addEventListener("focus", checkWhenFocused);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", checkWhenFocused);
     };
   }, []);
   const installUpdate = async () => {
