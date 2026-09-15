@@ -66,6 +66,10 @@ export interface FeedbackItem {
   attachments: FeedbackAttachment[];
 }
 
+export interface AuthSettings {
+  registration_enabled: boolean;
+}
+
 interface AuthResponse {
   access_token: string;
   refresh_token: string;
@@ -164,6 +168,10 @@ export function saveRememberedLogin(email: string, password: string): void {
 
 export function clearRememberedLogin(): void {
   localStorage.removeItem(REMEMBERED_LOGIN_KEY);
+}
+
+export async function getAuthSettings(): Promise<AuthSettings> {
+  return request<AuthSettings>("/v1/auth/settings", { method: "GET" });
 }
 
 export async function register(

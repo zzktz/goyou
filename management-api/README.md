@@ -19,6 +19,7 @@ curl http://127.0.0.1:18080/healthz
 - `POST /v1/auth/register/send-code` (发送邮箱验证码)
 - `POST /v1/auth/password-reset/send-code` (发送密码重置验证码)
 - `POST /v1/auth/password-reset` (使用邮箱验证码重置密码)
+- `GET /v1/auth/settings` (读取客户端认证设置)
 - `POST /v1/auth/login`
 - `POST /v1/auth/refresh`
 - `POST /v1/auth/logout`
@@ -31,6 +32,8 @@ curl http://127.0.0.1:18080/healthz
 - `POST /v1/proxy/lease/refresh`
 - `POST /v1/admin/auth/login`
 - `GET /v1/admin/auth/me`
+- `GET /v1/admin/settings`
+- `PATCH /v1/admin/settings`
 - `GET /v1/admin/overview`
 - `GET /v1/admin/users`
 - `POST /v1/admin/users`
@@ -70,6 +73,8 @@ curl http://127.0.0.1:18080/healthz
 每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 1000 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。`METERING_TOKEN` 只用于可信 relay 计量组件向内部接口上报上传和下载字节数；当前共享 relay 凭据尚不能区分用户，正式启用服务端限额前必须完成独立用户凭据和 relay 计量接入。
 
 管理后台前端位于仓库 `admin/`，生产地址记录在本机 `docs/敏感信息.md`。静态文件由管理服务器 Nginx 提供，`/v1/*` 仍然反代到本 API 容器。
+
+系统设置中的“新用户默认有效期”按注册当天加指定天数计算，只影响之后注册的用户；已有用户的到期时间不会自动变化。设置为 `0` 时，账号在注册当天结束时到期。
 
 桌面端版本徽标支持手动检查更新。管理员在后台“版本发布”页面创建草稿，分别上传
 Windows、macOS Apple 芯片和 macOS Intel 芯片的 updater 包及 `.sig` 签名文件，确认三个平台齐全后发布。

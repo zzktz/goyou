@@ -112,9 +112,9 @@ def next_reset_at() -> str:
     return reset.isoformat()
 
 
-def default_account_expires_at(created_at: datetime) -> str:
+def default_account_expires_at(created_at: datetime, valid_days: int = DEFAULT_ACCOUNT_VALID_DAYS) -> str:
     local_created = created_at.astimezone(quota_zone())
-    expiry_date = local_created.date() + timedelta(days=DEFAULT_ACCOUNT_VALID_DAYS)
+    expiry_date = local_created.date() + timedelta(days=valid_days)
     expiry = datetime.combine(expiry_date, datetime.max.time().replace(microsecond=0), tzinfo=quota_zone())
     return iso(expiry)
 
@@ -153,6 +153,31 @@ def db() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+REGISTRATION_SETTING_KEY = "registration_enabled"
+DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY = "default_account_valid_days"
+
+
+def system_setting_bool(connection: sqlite3.Connection, key: str, default: bool) -> bool:
+    row = connection.execute("SELECT value FROM system_settings WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return default
+    return str(row["value"]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def system_setting_int(connection: sqlite3.Connection, key: str, default: int) -> int:
+    row = connection.execute("SELECT value FROM system_settings WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return default
+    try:
+        return max(0, min(int(row["value"]), 3650))
+    except (TypeError, ValueError):
+        return default
+
+
+def registration_enabled(connection: sqlite3.Connection) -> bool:
+    return system_setting_bool(connection, REGISTRATION_SETTING_KEY, True)
 
 
 def ensure_user_quota(connection: sqlite3.Connection, user_id: str) -> sqlite3.Row:
@@ -334,6 +359,11 @@ def init_db() -> None:
                 size_bytes INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_reported_at ON usage_reports(reported_at);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_user_id ON usage_reports(user_id);
@@ -341,6 +371,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_feedback_user_created ON feedback(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback(status, created_at DESC);
             """
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+            (REGISTRATION_SETTING_KEY, "1", iso(now())),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+            (DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, str(DEFAULT_ACCOUNT_VALID_DAYS), iso(now())),
         )
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
         if "relay_port" not in lease_columns:
@@ -455,6 +493,11 @@ class AdminFeedbackReplyRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+
+class AdminSettingsUpdateRequest(BaseModel):
+    registration_enabled: bool | None = None
+    default_account_valid_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class AdminUserStatusRequest(BaseModel):
@@ -678,6 +721,12 @@ def startup() -> None:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/auth/settings")
+def auth_settings() -> dict[str, bool]:
+    with db() as connection:
+        return {"registration_enabled": registration_enabled(connection)}
 
 
 def _github_json(url: str) -> dict:
@@ -904,6 +953,8 @@ def download_update_asset(version: str, platform: str) -> FileResponse:
 def send_registration_code(payload: SendVerificationCodeRequest) -> dict[str, str]:
     email = str(payload.email).lower()
     with db() as connection:
+        if not registration_enabled(connection):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前暂未开放注册")
         if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已经注册，请直接登录")
         previous = connection.execute(
@@ -999,6 +1050,8 @@ def register(payload: RegisterRequest) -> dict:
     email = str(payload.email).lower()
     verification_error: HTTPException | None = None
     with db() as connection:
+        if not registration_enabled(connection):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前暂未开放注册")
         verification = connection.execute(
             "SELECT code_hash, expires_at, attempts FROM email_verification_codes WHERE email = ?", (email,)
         ).fetchone()
@@ -1021,9 +1074,19 @@ def register(payload: RegisterRequest) -> dict:
     created_at = iso(now())
     try:
         with db() as connection:
+            valid_days = system_setting_int(
+                connection, DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, DEFAULT_ACCOUNT_VALID_DAYS
+            )
             connection.execute(
                 "INSERT INTO users(id, email, name, password_hash, created_at, account_expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, email, name, password_hasher.hash(payload.password), created_at, default_account_expires_at(datetime.fromisoformat(created_at))),
+                (
+                    user_id,
+                    email,
+                    name,
+                    password_hasher.hash(payload.password),
+                    created_at,
+                    default_account_expires_at(datetime.fromisoformat(created_at), valid_days),
+                ),
             )
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     except sqlite3.IntegrityError:
@@ -1328,6 +1391,43 @@ def admin_me(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
 @app.post("/v1/admin/auth/logout")
 def admin_logout(admin: Annotated[dict[str, str], Depends(current_admin)]) -> None:
     return None
+
+
+@app.get("/v1/admin/settings")
+def admin_settings(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict[str, bool | int]:
+    del admin
+    with db() as connection:
+        return {
+            "registration_enabled": registration_enabled(connection),
+            "default_account_valid_days": system_setting_int(
+                connection, DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, DEFAULT_ACCOUNT_VALID_DAYS
+            ),
+        }
+
+
+@app.patch("/v1/admin/settings")
+def admin_update_settings(
+    payload: AdminSettingsUpdateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict[str, bool | int]:
+    del admin
+    with db() as connection:
+        updates: list[tuple[str, str]] = []
+        if payload.registration_enabled is not None:
+            updates.append((REGISTRATION_SETTING_KEY, "1" if payload.registration_enabled else "0"))
+        if payload.default_account_valid_days is not None:
+            updates.append((DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, str(payload.default_account_valid_days)))
+        for key, value in updates:
+            connection.execute(
+                "UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?",
+                (value, iso(now()), key),
+            )
+        return {
+            "registration_enabled": registration_enabled(connection),
+            "default_account_valid_days": system_setting_int(
+                connection, DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, DEFAULT_ACCOUNT_VALID_DAYS
+            ),
+        }
 
 
 def _release_or_404(connection: sqlite3.Connection, release_id: str) -> sqlite3.Row:

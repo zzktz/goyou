@@ -11,6 +11,7 @@ import appPackage from "../package.json";
 import {
   clearRememberedLogin,
   createFeedback,
+  getAuthSettings,
   getFeedback,
   getSession,
   getRememberedLogin,
@@ -109,6 +110,21 @@ function AuthPage({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    void getAuthSettings()
+      .then((settings) => {
+        if (active) setRegistrationEnabled(settings.registration_enabled);
+      })
+      .catch(() => {
+        // Keep registration available if an older API does not expose settings.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (codeCountdown <= 0) return;
@@ -119,6 +135,10 @@ function AuthPage({
   }, [codeCountdown]);
 
   const switchMode = (nextMode: "login" | "register" | "forgot") => {
+    if (nextMode === "register" && !registrationEnabled) {
+      setError("当前暂未开放注册");
+      return;
+    }
     setMode(nextMode);
     setError("");
     setSuccess("");
@@ -394,13 +414,17 @@ function AuthPage({
                   : "重置密码"}
           </button>
         </form>
-        <button
-          className="auth-mode-button"
-          onClick={() => switchMode(mode === "login" ? "register" : "login")}
-          type="button"
-        >
-          {mode === "login" ? "没有账号？注册" : "返回登录"}
-        </button>
+        {mode === "login" && !registrationEnabled ? (
+          <p className="auth-mode-button">注册功能暂未开放</p>
+        ) : (
+          <button
+            className="auth-mode-button"
+            onClick={() => switchMode(mode === "login" ? "register" : "login")}
+            type="button"
+          >
+            {mode === "login" ? "没有账号？注册" : "返回登录"}
+          </button>
+        )}
       </section>
     </main>
   );
