@@ -263,6 +263,7 @@ function Dashboard({
   const authFailureHandled = useRef(false);
   const accountExpiryHandled = useRef(false);
   const currentSession = useRef(session);
+  const currentStatus = useRef<Status | null>(null);
   const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
   const updateCheckInFlight = useRef(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
@@ -415,6 +416,10 @@ function Dashboard({
   useEffect(() => {
     currentSession.current = session;
   }, [session]);
+
+  useEffect(() => {
+    currentStatus.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (!accountMenuOpen) return;
@@ -779,7 +784,12 @@ function Dashboard({
     await availableUpdate?.close().catch(() => undefined);
     setAvailableUpdate(null);
     try {
-      const nextUpdate = await check({ timeout: 15_000 });
+      const nextUpdate = await check({
+        timeout: 15_000,
+        ...(currentStatus.current?.tunnelRunning
+          ? { proxy: "http://127.0.0.1:7890" }
+          : {}),
+      });
       if (!nextUpdate) {
         setAvailableUpdate(null);
         setHasAvailableUpdate(false);
@@ -810,7 +820,12 @@ function Dashboard({
       if (updateCheckInFlight.current) return;
       updateCheckInFlight.current = true;
       try {
-        const update = await check({ timeout: 15_000 });
+        const update = await check({
+          timeout: 15_000,
+          ...(currentStatus.current?.tunnelRunning
+            ? { proxy: "http://127.0.0.1:7890" }
+            : {}),
+        });
         if (!cancelled) setHasAvailableUpdate(Boolean(update));
         await update?.close().catch(() => undefined);
       } catch {
