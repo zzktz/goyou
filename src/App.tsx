@@ -19,6 +19,7 @@ import {
   logout,
   refreshSession,
   saveRememberedLogin,
+  updateProfile,
 } from "./auth";
 import type { AuthSession, FeedbackItem, UsageSummary } from "./auth";
 
@@ -224,6 +225,10 @@ function Dashboard({
   >(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [profileName, setProfileName] = useState(session.user.name);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [feedbackFiles, setFeedbackFiles] = useState<File[]>([]);
@@ -283,6 +288,34 @@ function Dashboard({
     setFeedbackError(null);
     setShowFeedback(true);
     void loadFeedback();
+  };
+
+  const openProfile = () => {
+    setAccountMenuOpen(false);
+    setProfileName(currentSession.current.user.name);
+    setProfileError(null);
+    setShowProfile(true);
+  };
+
+  const submitProfile = async () => {
+    const name = profileName.trim();
+    if (!name) {
+      setProfileError("请输入名称。");
+      return;
+    }
+    setProfileBusy(true);
+    setProfileError(null);
+    try {
+      const nextSession = await updateProfile(currentSession.current, name);
+      currentSession.current = nextSession;
+      onSessionRefreshed(nextSession);
+      setShowProfile(false);
+      setInfoMessage("个人信息已保存。");
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProfileBusy(false);
+    }
   };
 
   const selectFeedbackScreenshots = (event: ChangeEvent<HTMLInputElement>) => {
@@ -942,6 +975,9 @@ function Dashboard({
                   className="account-dropdown"
                   role="menu"
                 >
+                  <button onClick={openProfile} role="menuitem" type="button">
+                    个人信息
+                  </button>
                   <button onClick={openFeedback} role="menuitem" type="button">
                     问题反馈
                   </button>
@@ -1157,6 +1193,52 @@ function Dashboard({
               >
                 {diagnosticSubmitting && <span className="button-spinner" />}
                 {diagnosticSubmitting ? "上传中…" : "同意并上传"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {showProfile && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            aria-labelledby="profile-dialog-title"
+            aria-modal="true"
+            className="confirm-dialog profile-dialog"
+            role="dialog"
+          >
+            <h2 id="profile-dialog-title">个人信息</h2>
+            <label className="profile-field" htmlFor="profile-name">
+              <span>名称</span>
+              <input
+                disabled={profileBusy}
+                id="profile-name"
+                maxLength={80}
+                onChange={(event) => setProfileName(event.target.value)}
+                value={profileName}
+              />
+            </label>
+            <div className="profile-field">
+              <span>邮箱</span>
+              <p>{session.user.email}</p>
+            </div>
+            {profileError && <p className="profile-error">{profileError}</p>}
+            <div className="confirm-actions">
+              <button
+                className="cancel-button"
+                disabled={profileBusy}
+                onClick={() => setShowProfile(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="confirm-button action-button"
+                disabled={profileBusy}
+                onClick={() => void submitProfile()}
+                type="button"
+              >
+                {profileBusy && <span className="button-spinner" />}
+                {profileBusy ? "保存中…" : "保存"}
               </button>
             </div>
           </section>

@@ -233,6 +233,23 @@ export async function getTodayUsage(
   });
 }
 
+export async function updateProfile(
+  session: AuthSession,
+  name: string,
+): Promise<AuthSession> {
+  const response = await request<{ user: AuthUser }>("/v1/me", {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  return saveSession({
+    access_token: session.token,
+    refresh_token: session.refreshToken,
+    user: response.user,
+    lease: session.lease,
+  });
+}
+
 export async function getFeedback(
   session: AuthSession,
 ): Promise<FeedbackItem[]> {

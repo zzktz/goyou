@@ -564,6 +564,53 @@ button:disabled {
   color: #fff;
   background: #b42318;
 }
+.profile-dialog {
+  width: min(100%, 360px);
+  padding: 18px;
+}
+.profile-field {
+  display: block;
+  margin: 12px 0 0;
+}
+.profile-field > span {
+  display: block;
+  margin-bottom: 5px;
+  color: #52657a;
+  font-size: 12px;
+  font-weight: 650;
+}
+.profile-field input,
+.profile-field p {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  margin: 0;
+  border: 1px solid #d4dde6;
+  border-radius: 6px;
+  color: #172940;
+  background: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  padding: 8px 9px;
+}
+.profile-field input:focus {
+  border-color: #5293bd;
+  outline: 0;
+  box-shadow: 0 0 0 3px #5293bd18;
+}
+.profile-field p {
+  color: #718096;
+  background: #f6f8fa;
+  overflow-wrap: anywhere;
+}
+.profile-error {
+  margin: 10px 0 0 !important;
+  color: #b42318 !important;
+  font-size: 12px !important;
+}
+.profile-dialog .confirm-actions {
+  margin-top: 16px;
+}
 .update-dialog h2 {
   line-height: 1.35;
 }

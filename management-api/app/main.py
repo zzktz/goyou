@@ -384,6 +384,10 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=20)
 
 
+class ProfileUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class DeviceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     platform: str = Field(default="desktop", max_length=40)
@@ -881,6 +885,20 @@ def logout(user: Annotated[sqlite3.Row, Depends(current_user)]) -> None:
 @app.get("/v1/me")
 def me(user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
     return {"user": public_user(user)}
+
+
+@app.patch("/v1/me")
+def update_profile(
+    payload: ProfileUpdateRequest,
+    user: Annotated[sqlite3.Row, Depends(current_user)],
+) -> dict:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="名称不能为空")
+    with db() as connection:
+        connection.execute("UPDATE users SET name = ? WHERE id = ?", (name, user["id"]))
+        updated_user = connection.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    return {"user": public_user(updated_user)}
 
 
 @app.get("/v1/usage/today")
