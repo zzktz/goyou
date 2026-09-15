@@ -1257,12 +1257,10 @@ pub async fn get_goyou_usage(access_token: String) -> Result<serde_json::Value, 
     if !status.is_success() {
         let detail = value
             .get("detail")
-            .map(|detail| detail.to_string())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
             .unwrap_or_else(|| status.to_string());
-        return Err(format!(
-            "管理服务器返回错误（{}）：{detail}",
-            status.as_u16()
-        ));
+        return Err(detail);
     }
     Ok(value)
 }
@@ -1309,12 +1307,10 @@ pub async fn control_request(
     if !status.is_success() {
         let detail = value
             .get("detail")
-            .map(|detail| detail.to_string())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
             .unwrap_or_else(|| status.to_string());
-        return Err(format!(
-            "管理服务器返回错误（{}）：{detail}",
-            status.as_u16()
-        ));
+        return Err(detail);
     }
     Ok(value)
 }

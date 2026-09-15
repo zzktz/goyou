@@ -17,7 +17,11 @@ import {
   getTodayUsage,
   login,
   logout,
+  register as registerAccount,
+  requestPasswordResetCode,
+  requestRegistrationCode,
   refreshSession,
+  resetPassword,
   saveRememberedLogin,
   updateProfile,
 } from "./auth";
@@ -93,15 +97,73 @@ function AuthPage({
   onAuthenticated: (session: AuthSession) => void;
 }) {
   const rememberedLogin = getRememberedLogin();
+  const [mode, setMode] = useState<"login" | "register" | "forgot">("login");
+  const [name, setName] = useState("");
   const [email, setEmail] = useState(rememberedLogin?.email ?? "");
   const [password, setPassword] = useState(rememberedLogin?.password ?? "");
+  const [showPassword, setShowPassword] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [codeCountdown, setCodeCountdown] = useState(0);
   const [rememberLogin, setRememberLogin] = useState(rememberedLogin !== null);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (codeCountdown <= 0) return;
+    const timer = window.setInterval(() => {
+      setCodeCountdown((current) => Math.max(current - 1, 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [codeCountdown]);
+
+  const switchMode = (nextMode: "login" | "register" | "forgot") => {
+    setMode(nextMode);
+    setError("");
+    setSuccess("");
+    setCodeCountdown(0);
+    setVerificationCode("");
+  };
+
+  const openForgotPassword = () => {
+    if (!email.trim()) {
+      setError("请先输入邮箱，再点击忘记密码");
+      return;
+    }
+    switchMode("forgot");
+  };
+
+  const sendVerificationCode = async () => {
+    const normalizedEmail = email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setError("请输入有效的邮箱地址");
+      return;
+    }
+    setCodeBusy(true);
+    setError("");
+    try {
+      if (mode === "forgot") {
+        await requestPasswordResetCode(normalizedEmail);
+      } else {
+        await requestRegistrationCode(normalizedEmail);
+      }
+      setCodeCountdown(60);
+    } catch (submissionError) {
+      setError(
+        submissionError instanceof Error
+          ? submissionError.message
+          : String(submissionError),
+      );
+    } finally {
+      setCodeBusy(false);
+    }
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
+    setSuccess("");
     const normalizedEmail = email.trim();
     if (!normalizedEmail || !normalizedEmail.includes("@")) {
       setError("请输入有效的邮箱地址");
@@ -111,9 +173,52 @@ function AuthPage({
       setError("密码至少需要 8 位");
       return;
     }
+    if (
+      mode === "register" &&
+      name &&
+      !/^[A-Za-z\u4e00-\u9fff]{1,10}$/.test(name)
+    ) {
+      setError("姓名只能包含中文或英文字母，最多 10 个字符");
+      return;
+    }
+    if (
+      (mode === "register" || mode === "forgot") &&
+      !/^\d{6}$/.test(verificationCode)
+    ) {
+      setError("请输入 6 位邮箱验证码");
+      return;
+    }
+    if (mode === "forgot") {
+      setBusy(true);
+      try {
+        await resetPassword(normalizedEmail, verificationCode, password);
+        setMode("login");
+        setPassword("");
+        setVerificationCode("");
+        setCodeCountdown(0);
+        setSuccess("密码已重置，请使用新密码登录");
+      } catch (submissionError) {
+        setError(
+          submissionError instanceof Error
+            ? submissionError.message
+            : String(submissionError),
+        );
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     setBusy(true);
     try {
-      const session = await login(normalizedEmail, password);
+      const session =
+        mode === "register"
+          ? await registerAccount(
+              name,
+              normalizedEmail,
+              verificationCode,
+              password,
+            )
+          : await login(normalizedEmail, password);
       if (rememberLogin) {
         saveRememberedLogin(normalizedEmail, password);
       } else {
@@ -149,15 +254,35 @@ function AuthPage({
           </div>
         </div>
         <div className="auth-intro">
-          <h1 id="auth-title">用户登录</h1>
+          <h1 id="auth-title">
+            {mode === "login"
+              ? "用户登录"
+              : mode === "register"
+                ? "注册账号"
+                : "重置密码"}
+          </h1>
         </div>
         <form className="auth-form" onSubmit={(event) => void submit(event)}>
+          {mode === "register" && (
+            <div className="auth-field">
+              <label htmlFor="register-name">姓名</label>
+              <input
+                id="register-name"
+                autoComplete="name"
+                maxLength={10}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="中文或英文，最多 10 个字符"
+              />
+            </div>
+          )}
           <div className="auth-field">
-            <label htmlFor="login-email">账号</label>
+            <label htmlFor="login-email">邮箱</label>
             <input
               id="login-email"
               autoComplete="email"
               inputMode="email"
+              readOnly={mode === "forgot"}
               required
               type="email"
               value={email}
@@ -165,44 +290,117 @@ function AuthPage({
               placeholder="you@example.com"
             />
           </div>
+          {(mode === "register" || mode === "forgot") && (
+            <div className="auth-field auth-code-field">
+              <label htmlFor="verification-code">验证码</label>
+              <div className="auth-code-input">
+                <input
+                  id="verification-code"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={verificationCode}
+                  onChange={(event) =>
+                    setVerificationCode(event.target.value.replace(/\D/g, ""))
+                  }
+                  placeholder="6 位验证码"
+                />
+                <button
+                  className="code-button"
+                  disabled={codeBusy || codeCountdown > 0}
+                  onClick={() => void sendVerificationCode()}
+                  type="button"
+                >
+                  {codeBusy
+                    ? "发送中"
+                    : codeCountdown > 0
+                      ? `${codeCountdown}s`
+                      : "获取验证码"}
+                </button>
+              </div>
+            </div>
+          )}
           <div className="auth-field">
-            <label htmlFor="login-password">密码</label>
-            <input
-              id="login-password"
-              autoComplete="current-password"
-              required
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="至少 8 位字符"
-            />
-          </div>
-          <div className="form-row">
-            <label className="remember-option">
-              <input
-                checked={rememberLogin}
-                onChange={(event) => setRememberLogin(event.target.checked)}
-                type="checkbox"
-              />
-              <span>记住账号密码</span>
+            <label htmlFor="login-password">
+              {mode === "forgot" ? "新密码" : "密码"}
             </label>
-            <button
-              className="text-button"
-              type="button"
-              onClick={() => setError("密码找回功能将在管理服务器上线后开放")}
-            >
-              忘记密码？
-            </button>
+            <div className="password-input-wrap">
+              <input
+                id="login-password"
+                autoComplete={
+                  mode === "login" ? "current-password" : "new-password"
+                }
+                required
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="至少 8 位字符"
+              />
+              <button
+                aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                className="password-toggle"
+                onClick={() => setShowPassword((visible) => !visible)}
+                title={showPassword ? "隐藏密码" : "显示密码"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  {showPassword ? (
+                    <>
+                      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+                      <circle cx="12" cy="12" r="2.5" />
+                    </>
+                  ) : (
+                    <>
+                      <path d="m3 3 18 18" />
+                      <path d="M10.6 6.2A10.7 10.7 0 0 1 12 6c6 0 9.5 6 9.5 6a17 17 0 0 1-3.1 3.6M6.5 6.8C4 8.2 2.5 12 2.5 12s3.5 6 9.5 6c1.1 0 2.1-.2 3-.5" />
+                      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+                    </>
+                  )}
+                </svg>
+              </button>
+            </div>
           </div>
+          {mode === "login" && (
+            <div className="form-row">
+              <label className="remember-option">
+                <input
+                  checked={rememberLogin}
+                  onChange={(event) => setRememberLogin(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>记住账号密码</span>
+              </label>
+              <button
+                className="text-button"
+                type="button"
+                onClick={openForgotPassword}
+              >
+                忘记密码？
+              </button>
+            </div>
+          )}
           {error && (
             <p className="auth-error" role="alert">
               {error}
             </p>
           )}
+          {success && <p className="auth-success">{success}</p>}
           <button className="submit-button" disabled={busy} type="submit">
-            {busy ? "处理中…" : "登录"}
+            {busy
+              ? "处理中…"
+              : mode === "login"
+                ? "登录"
+                : mode === "register"
+                  ? "注册并登录"
+                  : "重置密码"}
           </button>
         </form>
+        <button
+          className="auth-mode-button"
+          onClick={() => switchMode(mode === "login" ? "register" : "login")}
+          type="button"
+        >
+          {mode === "login" ? "没有账号？注册" : "返回登录"}
+        </button>
       </section>
     </main>
   );

@@ -169,6 +169,7 @@ export function clearRememberedLogin(): void {
 export async function register(
   name: string,
   email: string,
+  verificationCode: string,
   password: string,
 ): Promise<AuthSession> {
   const response = await request<AuthResponse>("/v1/auth/register", {
@@ -176,10 +177,40 @@ export async function register(
     body: JSON.stringify({
       name: name.trim(),
       email: email.trim().toLowerCase(),
+      verification_code: verificationCode,
       password,
     }),
   });
   return authenticate(response);
+}
+
+export async function requestRegistrationCode(email: string): Promise<void> {
+  await request<{ message: string }>("/v1/auth/register/send-code", {
+    method: "POST",
+    body: JSON.stringify({ email: email.trim().toLowerCase() }),
+  });
+}
+
+export async function requestPasswordResetCode(email: string): Promise<void> {
+  await request<{ message: string }>("/v1/auth/password-reset/send-code", {
+    method: "POST",
+    body: JSON.stringify({ email: email.trim().toLowerCase() }),
+  });
+}
+
+export async function resetPassword(
+  email: string,
+  verificationCode: string,
+  password: string,
+): Promise<void> {
+  await request<{ message: string }>("/v1/auth/password-reset", {
+    method: "POST",
+    body: JSON.stringify({
+      email: email.trim().toLowerCase(),
+      verification_code: verificationCode,
+      password,
+    }),
+  });
 }
 
 export async function login(

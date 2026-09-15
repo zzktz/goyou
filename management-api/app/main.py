@@ -7,9 +7,11 @@ import logging
 import os
 import re
 import secrets
+import smtplib
 import sqlite3
 import urllib.error
 import urllib.request
+from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -61,6 +63,16 @@ UPDATE_PUBLIC_BASE_URL = os.getenv("UPDATE_PUBLIC_BASE_URL", "https://proxy.1233
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USERNAME or "").strip()
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "0").strip().lower() in {"1", "true", "yes"}
+SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "1").strip().lower() in {"1", "true", "yes"}
+VERIFICATION_CODE_EXPIRE_MINUTES = 10
+VERIFICATION_CODE_COOLDOWN_SECONDS = 60
+VERIFICATION_CODE_MAX_ATTEMPTS = 5
 password_hasher = PasswordHasher()
 bearer = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
@@ -227,6 +239,20 @@ def init_db() -> None:
                 expires_at TEXT NOT NULL,
                 revoked_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS email_verification_codes (
+                email TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS password_reset_codes (
+                email TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS leases (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -371,8 +397,19 @@ def init_db() -> None:
 
 class RegisterRequest(BaseModel):
     email: EmailStr
+    verification_code: str = Field(pattern=r"^\d{6}$")
     password: str = Field(min_length=8, max_length=128)
-    name: str = Field(default="", max_length=80)
+    name: str = Field(default="", max_length=10, pattern=r"^[A-Za-z\u4e00-\u9fff]*$")
+
+
+class SendVerificationCodeRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+    verification_code: str = Field(pattern=r"^\d{6}$")
+    password: str = Field(min_length=8, max_length=128)
 
 
 class LoginRequest(BaseModel):
@@ -500,6 +537,36 @@ def auth_response(row: sqlite3.Row) -> dict:
 
 def hash_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def verification_code_hash(email: str, code: str) -> str:
+    return hash_token(f"email-verification:{email}:{code}:{JWT_SECRET}")
+
+
+def send_verification_email(email: str, code: str, *, subject: str, description: str) -> None:
+    if not SMTP_HOST or not SMTP_FROM:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="邮箱验证服务尚未配置")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = SMTP_FROM
+    message["To"] = email
+    message.set_content(
+        f"您好，您的 GoYou{description}验证码是：{code}\n\n验证码 10 分钟内有效。如果不是您本人操作，请忽略此邮件。"
+    )
+    try:
+        smtp_class = smtplib.SMTP_SSL if SMTP_USE_SSL else smtplib.SMTP
+        with smtp_class(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            if not SMTP_USE_SSL:
+                server.ehlo()
+                if SMTP_STARTTLS:
+                    server.starttls()
+                    server.ehlo()
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+    except (OSError, smtplib.SMTPException) as error:
+        logger.exception("发送邮箱验证码失败: %s", error)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="验证码邮件发送失败，请稍后重试") from None
 
 
 def current_user(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]) -> sqlite3.Row:
@@ -833,9 +900,122 @@ def download_update_asset(version: str, platform: str) -> FileResponse:
     return FileResponse(path, filename=asset["filename"], media_type="application/octet-stream")
 
 
+@app.post("/v1/auth/register/send-code")
+def send_registration_code(payload: SendVerificationCodeRequest) -> dict[str, str]:
+    email = str(payload.email).lower()
+    with db() as connection:
+        if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该邮箱已经注册，请直接登录")
+        previous = connection.execute(
+            "SELECT sent_at FROM email_verification_codes WHERE email = ?", (email,)
+        ).fetchone()
+    if previous:
+        try:
+            seconds_since_sent = (now() - datetime.fromisoformat(previous["sent_at"])).total_seconds()
+        except (TypeError, ValueError):
+            seconds_since_sent = VERIFICATION_CODE_COOLDOWN_SECONDS
+        if seconds_since_sent < VERIFICATION_CODE_COOLDOWN_SECONDS:
+            wait_seconds = VERIFICATION_CODE_COOLDOWN_SECONDS - int(seconds_since_sent)
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"请 {max(wait_seconds, 1)} 秒后再发送验证码")
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    # Send first so a temporary SMTP outage does not leave a code that the user never received.
+    send_verification_email(email, code, subject="GoYou 注册验证码", description="注册")
+    sent_at = now()
+    expires_at = sent_at + timedelta(minutes=VERIFICATION_CODE_EXPIRE_MINUTES)
+    with db() as connection:
+        connection.execute(
+            """INSERT INTO email_verification_codes(email, code_hash, expires_at, sent_at, attempts)
+               VALUES (?, ?, ?, ?, 0)
+               ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash,
+                   expires_at = excluded.expires_at, sent_at = excluded.sent_at, attempts = 0""",
+            (email, verification_code_hash(email, code), iso(expires_at), iso(sent_at)),
+        )
+    return {"message": "验证码已发送", "expires_at": iso(expires_at)}
+
+
+@app.post("/v1/auth/password-reset/send-code")
+def send_password_reset_code(payload: SendVerificationCodeRequest) -> dict[str, str]:
+    email = str(payload.email).lower()
+    with db() as connection:
+        user_exists = connection.execute("SELECT 1 FROM users WHERE email = ? AND disabled = 0", (email,)).fetchone()
+        previous = connection.execute(
+            "SELECT sent_at FROM password_reset_codes WHERE email = ?", (email,)
+        ).fetchone()
+    # Keep the response identical for unknown addresses to avoid account enumeration.
+    if not user_exists:
+        return {"message": "如果该邮箱已注册，验证码将发送到邮箱", "expires_at": ""}
+    if previous:
+        try:
+            seconds_since_sent = (now() - datetime.fromisoformat(previous["sent_at"])).total_seconds()
+        except (TypeError, ValueError):
+            seconds_since_sent = VERIFICATION_CODE_COOLDOWN_SECONDS
+        if seconds_since_sent < VERIFICATION_CODE_COOLDOWN_SECONDS:
+            wait_seconds = VERIFICATION_CODE_COOLDOWN_SECONDS - int(seconds_since_sent)
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"请 {max(wait_seconds, 1)} 秒后再发送验证码")
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    send_verification_email(email, code, subject="GoYou 密码重置验证码", description="密码重置")
+    sent_at = now()
+    expires_at = sent_at + timedelta(minutes=VERIFICATION_CODE_EXPIRE_MINUTES)
+    with db() as connection:
+        connection.execute(
+            """INSERT INTO password_reset_codes(email, code_hash, expires_at, sent_at, attempts)
+               VALUES (?, ?, ?, ?, 0)
+               ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash,
+                   expires_at = excluded.expires_at, sent_at = excluded.sent_at, attempts = 0""",
+            (email, verification_code_hash(email, code), iso(expires_at), iso(sent_at)),
+        )
+    return {"message": "验证码已发送", "expires_at": iso(expires_at)}
+
+
+@app.post("/v1/auth/password-reset")
+def reset_password(payload: PasswordResetRequest) -> dict[str, str]:
+    email = str(payload.email).lower()
+    verification_error: HTTPException | None = None
+    with db() as connection:
+        verification = connection.execute(
+            "SELECT code_hash, expires_at, attempts FROM password_reset_codes WHERE email = ?", (email,)
+        ).fetchone()
+        if not verification:
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先获取密码重置验证码")
+        elif datetime.fromisoformat(verification["expires_at"]) <= now():
+            connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="验证码已过期，请重新获取")
+        elif int(verification["attempts"]) >= VERIFICATION_CODE_MAX_ATTEMPTS:
+            verification_error = HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="验证码尝试次数过多，请重新获取")
+        elif not secrets.compare_digest(verification["code_hash"], verification_code_hash(email, payload.verification_code)):
+            connection.execute("UPDATE password_reset_codes SET attempts = attempts + 1 WHERE email = ?", (email,))
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邮箱验证码不正确")
+        else:
+            connection.execute("DELETE FROM password_reset_codes WHERE email = ?", (email,))
+            connection.execute("UPDATE users SET password_hash = ? WHERE email = ? AND disabled = 0", (password_hasher.hash(payload.password), email))
+            connection.execute("UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = (SELECT id FROM users WHERE email = ?) AND revoked_at IS NULL", (iso(now()), email))
+    if verification_error:
+        raise verification_error
+    return {"message": "密码已重置，请使用新密码登录"}
+
+
 @app.post("/v1/auth/register", status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest) -> dict:
     email = str(payload.email).lower()
+    verification_error: HTTPException | None = None
+    with db() as connection:
+        verification = connection.execute(
+            "SELECT code_hash, expires_at, attempts FROM email_verification_codes WHERE email = ?", (email,)
+        ).fetchone()
+        if not verification:
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先获取邮箱验证码")
+        elif datetime.fromisoformat(verification["expires_at"]) <= now():
+            connection.execute("DELETE FROM email_verification_codes WHERE email = ?", (email,))
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="验证码已过期，请重新获取")
+        elif int(verification["attempts"]) >= VERIFICATION_CODE_MAX_ATTEMPTS:
+            verification_error = HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="验证码尝试次数过多，请重新获取")
+        elif not secrets.compare_digest(verification["code_hash"], verification_code_hash(email, payload.verification_code)):
+            connection.execute("UPDATE email_verification_codes SET attempts = attempts + 1 WHERE email = ?", (email,))
+            verification_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邮箱验证码不正确")
+        else:
+            connection.execute("DELETE FROM email_verification_codes WHERE email = ?", (email,))
+    if verification_error:
+        raise verification_error
     name = payload.name.strip() or email.split("@", 1)[0]
     user_id = secrets.token_hex(16)
     created_at = iso(now())
