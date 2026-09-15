@@ -7,11 +7,6 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // A forced quit or crash cannot run the normal exit hook. Clean
-            // up any persisted local proxy state before showing the window so
-            // browsers are never left pointing at a dead 127.0.0.1:7890.
-            commands::recover_stale_proxy();
-
             #[cfg(target_os = "macos")]
             {
                 // Tauri's default macOS menu derives these labels from the
@@ -45,6 +40,11 @@ pub fn run() {
                 });
                 let _ = window.show();
             }
+
+            // A forced quit or crash cannot run the normal exit hook. Recover
+            // stale proxy state after showing the window so a slow Windows
+            // taskkill or PowerShell process lookup cannot block startup.
+            std::thread::spawn(commands::recover_stale_proxy);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
