@@ -13,6 +13,7 @@ import {
   FileTextOutlined,
   RocketOutlined,
   MessageOutlined,
+  UserOutlined,
 } from "@ant-design/icons-vue";
 import { useAuthStore } from "@/stores/auth";
 
@@ -22,7 +23,9 @@ const auth = useAuthStore();
 const collapsed = ref(false);
 const settingsOpen = ref(false);
 const active = computed(() =>
-  route.path.startsWith("/users")
+  route.path.startsWith("/profile")
+    ? "/profile"
+    : route.path.startsWith("/users")
     ? "/users"
     : route.path.startsWith("/leases")
       ? "/leases"
@@ -126,6 +129,8 @@ function logout() {
             /></a>
             <template #overlay>
               <a-menu
+                ><a-menu-item @click="go('/profile')"
+                  ><UserOutlined />个人中心</a-menu-item
                 ><a-menu-item @click="go('/settings')"
                   ><SettingOutlined />系统设置</a-menu-item
                 ><a-menu-divider /><a-menu-item @click="logout"

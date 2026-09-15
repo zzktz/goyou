@@ -157,6 +157,8 @@ def db() -> sqlite3.Connection:
 
 REGISTRATION_SETTING_KEY = "registration_enabled"
 DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY = "default_account_valid_days"
+ADMIN_EMAIL_SETTING_KEY = "admin_email"
+ADMIN_PASSWORD_HASH_SETTING_KEY = "admin_password_hash"
 
 
 def system_setting_bool(connection: sqlite3.Connection, key: str, default: bool) -> bool:
@@ -178,6 +180,18 @@ def system_setting_int(connection: sqlite3.Connection, key: str, default: int) -
 
 def registration_enabled(connection: sqlite3.Connection) -> bool:
     return system_setting_bool(connection, REGISTRATION_SETTING_KEY, True)
+
+
+def admin_email(connection: sqlite3.Connection) -> str:
+    row = connection.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_EMAIL_SETTING_KEY,)).fetchone()
+    return str(row["value"]).strip().lower() if row else ADMIN_EMAIL
+
+
+def admin_password_hash(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        "SELECT value FROM system_settings WHERE key = ?", (ADMIN_PASSWORD_HASH_SETTING_KEY,)
+    ).fetchone()
+    return str(row["value"]) if row else ADMIN_PASSWORD_HASH
 
 
 def ensure_user_quota(connection: sqlite3.Connection, user_id: str) -> sqlite3.Row:
@@ -380,6 +394,17 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
             (DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, str(DEFAULT_ACCOUNT_VALID_DAYS), iso(now())),
         )
+        if ADMIN_EMAIL:
+            connection.execute(
+                "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+                (ADMIN_EMAIL_SETTING_KEY, ADMIN_EMAIL, iso(now())),
+            )
+        if ADMIN_PASSWORD_HASH or ADMIN_PASSWORD:
+            initial_password_hash = ADMIN_PASSWORD_HASH or password_hasher.hash(ADMIN_PASSWORD)
+            connection.execute(
+                "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+                (ADMIN_PASSWORD_HASH_SETTING_KEY, initial_password_hash, iso(now())),
+            )
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
         if "relay_port" not in lease_columns:
             connection.execute("ALTER TABLE leases ADD COLUMN relay_port INTEGER")
@@ -498,6 +523,12 @@ class AdminLoginRequest(BaseModel):
 class AdminSettingsUpdateRequest(BaseModel):
     registration_enabled: bool | None = None
     default_account_valid_days: int | None = Field(default=None, ge=0, le=3650)
+
+
+class AdminProfileUpdateRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    email: EmailStr | None = None
+    new_password: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 class AdminUserStatusRequest(BaseModel):
@@ -637,7 +668,8 @@ def current_admin(credentials: Annotated[HTTPAuthorizationCredentials | None, De
             raise ValueError
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="管理员登录已过期") from None
-    return {"email": ADMIN_EMAIL, "name": "GoYou 管理员"}
+    with db() as connection:
+        return {"email": admin_email(connection), "name": "GoYou 管理员"}
 
 
 def current_metering_agent(
@@ -647,10 +679,11 @@ def current_metering_agent(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="计量服务未授权")
 
 
-def verify_admin_password(password: str) -> bool:
-    if ADMIN_PASSWORD_HASH:
+def verify_admin_password(password: str, configured_hash: str | None = None) -> bool:
+    password_hash = configured_hash if configured_hash is not None else ADMIN_PASSWORD_HASH
+    if password_hash:
         try:
-            return password_hasher.verify(ADMIN_PASSWORD_HASH, password)
+            return password_hasher.verify(password_hash, password)
         except (VerifyMismatchError, VerificationError, InvalidHashError):
             return False
     return bool(ADMIN_PASSWORD) and secrets.compare_digest(password, ADMIN_PASSWORD)
@@ -1372,14 +1405,17 @@ def relay_leases(
 @app.post("/v1/admin/auth/login")
 def admin_login(payload: AdminLoginRequest) -> dict:
     email = str(payload.email).lower()
-    if not ADMIN_EMAIL or not (ADMIN_PASSWORD or ADMIN_PASSWORD_HASH):
+    with db() as connection:
+        configured_email = admin_email(connection)
+        configured_password_hash = admin_password_hash(connection)
+    if not configured_email or not configured_password_hash:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="管理员账号尚未配置")
-    if email != ADMIN_EMAIL or not verify_admin_password(payload.password):
+    if email != configured_email or not verify_admin_password(payload.password, configured_password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="管理员邮箱或密码不正确")
     return {
         "access_token": admin_access_token(),
         "token_type": "bearer",
-        "user": {"email": ADMIN_EMAIL, "name": "GoYou 管理员"},
+        "user": {"email": configured_email, "name": "GoYou 管理员"},
     }
 
 
@@ -1391,6 +1427,37 @@ def admin_me(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
 @app.post("/v1/admin/auth/logout")
 def admin_logout(admin: Annotated[dict[str, str], Depends(current_admin)]) -> None:
     return None
+
+
+@app.get("/v1/admin/profile")
+def admin_profile(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
+    return {"user": admin}
+
+
+@app.patch("/v1/admin/profile")
+def admin_update_profile(
+    payload: AdminProfileUpdateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict:
+    del admin
+    with db() as connection:
+        configured_hash = admin_password_hash(connection)
+        if not configured_hash or not verify_admin_password(payload.current_password, configured_hash):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="当前密码不正确")
+        next_email = str(payload.email).lower() if payload.email is not None else admin_email(connection)
+        next_password_hash = password_hasher.hash(payload.new_password) if payload.new_password else configured_hash
+        updated_at = iso(now())
+        connection.execute(
+            "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (ADMIN_EMAIL_SETTING_KEY, next_email, updated_at),
+        )
+        connection.execute(
+            "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (ADMIN_PASSWORD_HASH_SETTING_KEY, next_password_hash, updated_at),
+        )
+    return {"user": {"email": next_email, "name": "GoYou 管理员"}}
 
 
 @app.get("/v1/admin/settings")

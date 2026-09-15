@@ -6,6 +6,7 @@ import DashboardPage from "@/pages/DashboardPage.vue";
 import UsersPage from "@/pages/UsersPage.vue";
 import LeasesPage from "@/pages/LeasesPage.vue";
 import SettingsPage from "@/pages/SettingsPage.vue";
+import ProfilePage from "@/pages/ProfilePage.vue";
 import TrafficLogsPage from "@/pages/TrafficLogsPage.vue";
 import ReleasesPage from "@/pages/ReleasesPage.vue";
 import FeedbackPage from "@/pages/FeedbackPage.vue";
@@ -45,6 +46,11 @@ const router = createRouter({
           path: "settings",
           component: SettingsPage,
           meta: { title: "系统设置" },
+        },
+        {
+          path: "profile",
+          component: ProfilePage,
+          meta: { title: "个人中心" },
         },
       ],
     },

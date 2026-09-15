@@ -32,6 +32,8 @@ curl http://127.0.0.1:18080/healthz
 - `POST /v1/proxy/lease/refresh`
 - `POST /v1/admin/auth/login`
 - `GET /v1/admin/auth/me`
+- `GET /v1/admin/profile`
+- `PATCH /v1/admin/profile`
 - `GET /v1/admin/settings`
 - `PATCH /v1/admin/settings`
 - `GET /v1/admin/overview`
