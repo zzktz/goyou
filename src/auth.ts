@@ -85,6 +85,15 @@ export const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL || "https://proxy.123371.com"
 ).replace(/\/$/, "");
 
+export function formatErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("管理服务器返回错误")) return message;
+  const quotedMessage = message.match(
+    /管理服务器返回错误(?:\s*[（(]\d+[）)])?\s*[：:]\s*[“"]([\s\S]*?)[”"]/u,
+  )?.[1];
+  return quotedMessage?.trim() || message;
+}
+
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   const headers = new Headers(init.headers);
   const authorization = headers.get("Authorization");
@@ -97,10 +106,9 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
       accessToken: authorization?.replace(/^Bearer\s+/i, "") ?? null,
     });
   } catch (error) {
-    if (error instanceof Error && /超时/.test(error.message)) {
-      throw error;
-    }
-    throw new Error(error instanceof Error ? error.message : String(error));
+    const message = formatErrorMessage(error);
+    if (error instanceof Error && message === error.message) throw error;
+    throw new Error(message);
   }
 }
 
@@ -267,9 +275,15 @@ export async function refreshSession(
 export async function getTodayUsage(
   session: AuthSession,
 ): Promise<UsageSummary> {
-  return invoke<UsageSummary>("get_goyou_usage", {
-    accessToken: session.token,
-  });
+  try {
+    return await invoke<UsageSummary>("get_goyou_usage", {
+      accessToken: session.token,
+    });
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    if (error instanceof Error && message === error.message) throw error;
+    throw new Error(message);
+  }
 }
 
 export async function updateProfile(
