@@ -1,0 +1,8 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Transparent GoYou mark for the macOS menu-bar template icon. -->
+  <g transform="skewX(-18)" fill="#fff">
+    <rect x="340" y="324" width="142" height="376" rx="55" />
+    <rect x="567" y="205" width="142" height="614" rx="55" />
+    <rect x="794" y="273" width="142" height="478" rx="55" />
+  </g>
+</svg>

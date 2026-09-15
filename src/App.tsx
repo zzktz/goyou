@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   check,
@@ -913,6 +914,20 @@ function Dashboard({
       setBusyAction(null);
     }
   };
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen("tray:toggle-proxy", () => {
+      if (busy) return;
+      if (currentStatus.current?.state === "on") {
+        void disable();
+      } else {
+        void enable();
+      }
+    }).then((stopListening) => {
+      unlisten = stopListening;
+    });
+    return () => unlisten?.();
+  }, [busy, disable, enable]);
   useEffect(() => {
     if (!usage?.exceeded) {
       autoClosedDate.current = null;

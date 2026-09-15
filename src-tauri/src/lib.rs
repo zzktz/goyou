@@ -1,6 +1,22 @@
 mod auto_launch;
 mod commands;
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, RunEvent, WindowEvent,
+};
+
+const SHOW_WINDOW_MENU_ID: &str = "show-window";
+const TOGGLE_PROXY_MENU_ID: &str = "toggle-proxy";
+const QUIT_MENU_ID: &str = "quit";
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -32,10 +48,66 @@ pub fn run() {
                 }
             }
 
+            let show_window =
+                MenuItem::with_id(app, SHOW_WINDOW_MENU_ID, "显示 GoYou", true, None::<&str>)?;
+            let toggle_proxy = MenuItem::with_id(
+                app,
+                TOGGLE_PROXY_MENU_ID,
+                "开启/关闭代理",
+                true,
+                None::<&str>,
+            )?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, QUIT_MENU_ID, "退出 GoYou", true, None::<&str>)?;
+            let tray_menu =
+                Menu::with_items(app, &[&show_window, &toggle_proxy, &separator, &quit])?;
+
+            let tray_builder = TrayIconBuilder::with_id("goyou-tray")
+                .menu(&tray_menu)
+                .tooltip("GoYou")
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    SHOW_WINDOW_MENU_ID => show_main_window(app),
+                    TOGGLE_PROXY_MENU_ID => {
+                        let _ = app.emit("tray:toggle-proxy", ());
+                    }
+                    QUIT_MENU_ID => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+
+            #[cfg(target_os = "macos")]
+            // Keep this source dependency so tray asset updates force a new app binary.
+            let tray_builder = tray_builder
+                .icon(tauri::include_image!(
+                    "icons/tray/macos/statusbar_template_3x.png"
+                ))
+                .icon_as_template(true);
+            #[cfg(not(target_os = "macos"))]
+            let tray_builder = tray_builder.icon(
+                app.default_window_icon()
+                    .cloned()
+                    .expect("missing default application icon"),
+            );
+            // Keep the tray resource alive for the lifetime of the application.
+            // Dropping it removes the status-bar item on macOS.
+            std::mem::forget(tray_builder.build(app)?);
+
             if let Some(window) = app.get_webview_window("main") {
-                window.on_window_event(|event| {
-                    if matches!(event, WindowEvent::CloseRequested { .. }) {
-                        let _ = commands::disable_goyou();
+                let window_for_events = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_for_events.hide();
                     }
                 });
                 let _ = window.show();
