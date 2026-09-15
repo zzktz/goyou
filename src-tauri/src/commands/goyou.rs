@@ -782,7 +782,7 @@ fn set_system_proxy(enabled: bool) -> Result<bool, String> {
                 "/t",
                 "REG_SZ",
                 "/d",
-                "socks=127.0.0.1:7890",
+                "http=127.0.0.1:7890;https=127.0.0.1:7890",
                 "/f",
             ])
             .status()
