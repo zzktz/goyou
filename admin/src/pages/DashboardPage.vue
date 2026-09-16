@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { CheckCircleOutlined, CloudServerOutlined, ReloadOutlined, TeamOutlined, KeyOutlined } from '@ant-design/icons-vue'
+import { CheckCircleOutlined, ClockCircleOutlined, CloudServerOutlined, KeyOutlined, ReloadOutlined, StopOutlined, TeamOutlined } from '@ant-design/icons-vue'
 import client from '@/api/client'
 
 const data = ref(null)
@@ -30,10 +30,10 @@ onMounted(load)
     <div class="page-title"><div><h1>运行总览</h1><p>查看管理 API、用户账户和代理租约的实时状态。</p></div><a-button :loading="loading" @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button></div>
     <a-alert v-if="data" type="success" show-icon class="service-alert"><template #message><span>管理 API 运行正常</span></template><template #description>数据更新时间：{{ formatDate(data.generated_at) }}</template><template #icon><CheckCircleOutlined /></template></a-alert>
     <a-row :gutter="20" class="stat-row">
-      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="用户总数" :value="data?.users.total || 0" :loading="loading"><template #prefix><TeamOutlined /></template></a-statistic><div class="stat-note">启用 {{ data?.users.enabled || 0 }} · 停用 {{ data?.users.disabled || 0 }}</div></a-card></a-col>
-      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="活跃租约" :value="data?.leases.active || 0" :loading="loading"><template #prefix><KeyOutlined /></template></a-statistic><div class="stat-note">租约总数 {{ data?.leases.total || 0 }}</div></a-card></a-col>
-      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="已过期租约" :value="data?.leases.expired || 0" :loading="loading" /></a-card></a-col>
-      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="已撤销租约" :value="data?.leases.revoked || 0" :loading="loading" /></a-card></a-col>
+      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-blue" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><TeamOutlined /></div><span>用户总数</span></div><div class="stat-card-value">{{ data?.users.total || 0 }}</div><div class="stat-note">启用 {{ data?.users.enabled || 0 }} · 停用 {{ data?.users.disabled || 0 }}</div></a-card></a-col>
+      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-cyan" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><KeyOutlined /></div><span>活跃租约</span></div><div class="stat-card-value">{{ data?.leases.active || 0 }}</div><div class="stat-note">租约总数 {{ data?.leases.total || 0 }}</div></a-card></a-col>
+      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-orange" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><ClockCircleOutlined /></div><span>已过期租约</span></div><div class="stat-card-value">{{ data?.leases.expired || 0 }}</div><div class="stat-note">已结束的历史租约</div></a-card></a-col>
+      <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-red" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><StopOutlined /></div><span>已撤销租约</span></div><div class="stat-card-value">{{ data?.leases.revoked || 0 }}</div><div class="stat-note">管理员主动撤销</div></a-card></a-col>
     </a-row>
     <a-card v-if="data?.monthly_usage" title="月度流量" class="panel-card monthly-usage-card" :loading="loading">
       <div class="monthly-usage-content">
