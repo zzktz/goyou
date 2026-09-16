@@ -155,6 +155,38 @@ body {
   color: #829ab1;
   font-size: 12px;
 }
+.monthly-usage-card {
+  margin-bottom: 20px;
+}
+.monthly-usage-content {
+  display: flex;
+  align-items: center;
+  gap: 34px;
+}
+.monthly-usage-details {
+  min-width: 0;
+  flex: 1;
+}
+.monthly-usage-total {
+  color: #102a43;
+  font-size: 16px;
+}
+.monthly-usage-total strong {
+  font-size: 28px;
+  font-weight: 600;
+}
+.monthly-usage-label {
+  margin: 2px 0 12px;
+  color: #829ab1;
+  font-size: 12px;
+}
+@media (max-width: 600px) {
+  .monthly-usage-content {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 20px;
+  }
+}
 .quick-item {
   display: flex;
   align-items: center;

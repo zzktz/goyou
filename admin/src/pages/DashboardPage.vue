@@ -8,6 +8,12 @@ const data = ref(null)
 const loading = ref(true)
 
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
+function formatGigabytes(value) {
+  const gigabytes = Number(value || 0) / 1000000000
+  const precision = gigabytes >= 100 || gigabytes === 0 ? 0 : 1
+  return `${gigabytes.toFixed(precision)} GB`
+}
+function monthlyUsageColor(usage) { return usage?.exceeded ? '#cf1322' : usage?.percentage >= 80 ? '#d48806' : '#1677ff' }
 function relayStatusColor(value) { return value === 'ok' ? 'success' : value === 'warning' ? 'warning' : 'error' }
 function relayStatusLabel(value) { return value === 'ok' ? '正常' : value === 'warning' ? '需关注' : '异常' }
 function formatPorts(values) { return values?.length ? values.join('、') : '无' }
@@ -29,6 +35,21 @@ onMounted(load)
       <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="已过期租约" :value="data?.leases.expired || 0" :loading="loading" /></a-card></a-col>
       <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card"><a-statistic title="已撤销租约" :value="data?.leases.revoked || 0" :loading="loading" /></a-card></a-col>
     </a-row>
+    <a-card v-if="data?.monthly_usage" title="月度流量" class="panel-card monthly-usage-card" :loading="loading">
+      <div class="monthly-usage-content">
+        <a-progress type="circle" :percent="Math.min(data.monthly_usage.percentage, 100)" :stroke-color="monthlyUsageColor(data.monthly_usage)" :width="132" />
+        <div class="monthly-usage-details">
+          <div class="monthly-usage-total"><strong>{{ formatGigabytes(data.monthly_usage.used_bytes) }}</strong><span> / {{ formatGigabytes(data.monthly_usage.quota_bytes) }}</span></div>
+          <div class="monthly-usage-label">已使用 / 月度固定额度</div>
+          <a-descriptions :column="1" size="small">
+            <a-descriptions-item label="统计周期">{{ data.monthly_usage.period_start }} 00:00 至 {{ data.monthly_usage.period_end }} 00:00（每月 10 日切换）</a-descriptions-item>
+            <a-descriptions-item label="剩余流量">{{ formatGigabytes(data.monthly_usage.remaining_bytes) }}</a-descriptions-item>
+            <a-descriptions-item label="上传 / 下载">{{ formatGigabytes(data.monthly_usage.upload_bytes) }} / {{ formatGigabytes(data.monthly_usage.download_bytes) }}</a-descriptions-item>
+          </a-descriptions>
+          <a-alert v-if="data.monthly_usage.exceeded" type="error" show-icon message="本月流量额度已用尽" />
+        </div>
+      </div>
+    </a-card>
     <a-card v-if="data?.relays?.length" title="Relay 节点" class="panel-card relay-list-card" :loading="loading">
       <a-table :data-source="data.relays" row-key="id" :pagination="false" :scroll="{ x: 900 }" size="small">
         <a-table-column title="节点" key="name"><template #default="{ record }"><strong>{{ record.name }}</strong><br><span class="muted">{{ record.id }}</span></template></a-table-column>

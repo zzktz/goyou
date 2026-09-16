@@ -69,6 +69,8 @@ curl http://127.0.0.1:18080/healthz
 
 管理员账号由 `ADMIN_EMAIL` 与 `ADMIN_PASSWORD_HASH`（推荐）或 `ADMIN_PASSWORD` 配置，不与客户端普通用户账号共用令牌。管理员令牌的 JWT 类型独立为 `admin_access`，不能调用客户端接口。
 
+运行总览中的月度流量按 `QUOTA_TIMEZONE` 统计，每个周期从当月 10 日 00:00 到下月 10 日 00:00，固定额度为 1000 GB，并汇总所有用户的上传和下载用量。
+
 用户自助注册必须先调用 `/v1/auth/register/send-code` 获取邮箱验证码，再提交 `/v1/auth/register`。注册接口只接受邮箱格式账号，验证码有效期 10 分钟，单个邮箱每 60 秒最多发送一次。生产环境需要配置 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `SMTP_FROM`；使用 465 端口的 SSL 邮箱时设置 `SMTP_USE_SSL=1`，否则默认使用 STARTTLS。
 
 忘记密码时先调用 `/v1/auth/password-reset/send-code`，再提交 `/v1/auth/password-reset` 设置新密码。密码重置成功后，该用户已有的刷新令牌会全部失效。

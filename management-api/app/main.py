@@ -12,6 +12,7 @@ import sqlite3
 import urllib.error
 import urllib.request
 from email.message import EmailMessage
+from datetime import date as calendar_date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -40,7 +41,7 @@ else:
     # Keep existing deployments on their original database until an explicit
     # DB_PATH is supplied; new installations use the GoYou filename.
     DB_PATH = _legacy_db_path if _legacy_db_path.exists() and not _goyou_db_path.exists() else _goyou_db_path
-ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
+ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "240"))
 REFRESH_TOKEN_DAYS = int(os.getenv("REFRESH_TOKEN_DAYS", "30"))
 RELAY_HOST = os.getenv("RELAY_HOST", "relay.123371.com")
 RELAY_PORT = int(os.getenv("RELAY_PORT", "24443"))
@@ -55,6 +56,7 @@ RELAY_HEARTBEAT_TIMEOUT_SECONDS = max(
 DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "1000000000"))
 DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
+MONTHLY_TRAFFIC_QUOTA_BYTES = 1_000_000_000_000
 METERING_TOKEN = os.getenv("METERING_TOKEN", "").strip()
 UPDATE_GITHUB_REPOSITORY = os.getenv("UPDATE_GITHUB_REPOSITORY", "zzktz/goyou").strip()
 UPDATE_STORAGE_DIR = Path(os.getenv("UPDATE_STORAGE_DIR", str(DB_PATH.parent / "updates")))
@@ -107,6 +109,47 @@ def usage_day_bounds(target_date: str) -> tuple[str, str]:
     start = datetime.combine(day, datetime.min.time(), tzinfo=zone)
     end = start + timedelta(days=1)
     return iso(start), iso(end)
+
+
+def monthly_usage_period(value: datetime | None = None) -> tuple[calendar_date, calendar_date]:
+    """Return the current billing period, which runs from the 10th to the next 10th."""
+    local_now = (value or now()).astimezone(quota_zone())
+    if local_now.day >= 10:
+        start_year, start_month = local_now.year, local_now.month
+        end_year, end_month = (start_year + 1, 1) if start_month == 12 else (start_year, start_month + 1)
+    else:
+        end_year, end_month = local_now.year, local_now.month
+        start_year, start_month = (end_year - 1, 12) if end_month == 1 else (end_year, end_month - 1)
+    return calendar_date(start_year, start_month, 10), calendar_date(end_year, end_month, 10)
+
+
+def monthly_usage_payload(connection: sqlite3.Connection) -> dict[str, object]:
+    period_start, period_end = monthly_usage_period()
+    row = connection.execute(
+        """SELECT COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
+                  COALESCE(SUM(download_bytes), 0) AS download_bytes,
+                  COALESCE(SUM(total_bytes), 0) AS total_bytes
+           FROM daily_usage
+           WHERE usage_date >= ? AND usage_date < ?""",
+        (period_start.isoformat(), period_end.isoformat()),
+    ).fetchone()
+    upload_bytes = int(row["upload_bytes"] or 0)
+    download_bytes = int(row["download_bytes"] or 0)
+    used_bytes = int(row["total_bytes"] or upload_bytes + download_bytes)
+    quota_bytes = MONTHLY_TRAFFIC_QUOTA_BYTES
+    percentage = round((used_bytes / quota_bytes) * 100, 2) if quota_bytes else 100
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "timezone": QUOTA_TIMEZONE,
+        "upload_bytes": upload_bytes,
+        "download_bytes": download_bytes,
+        "used_bytes": used_bytes,
+        "quota_bytes": quota_bytes,
+        "remaining_bytes": max(quota_bytes - used_bytes, 0),
+        "percentage": percentage,
+        "exceeded": used_bytes >= quota_bytes,
+    }
 
 
 def next_reset_at() -> str:
@@ -2357,6 +2400,7 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
         "relays": relay_payloads,
         "users": {"total": users["total"], "enabled": users["enabled"] or 0, "disabled": (users["total"] or 0) - (users["enabled"] or 0)},
         "leases": {"total": len(leases), **states},
+        "monthly_usage": monthly_usage_payload(connection),
         "active_refresh_tokens": refresh_tokens,
         "generated_at": iso(now()),
     }

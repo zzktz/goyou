@@ -11,6 +11,7 @@ os.environ.setdefault("JWT_SECRET", "test-secret-that-is-at-least-32-characters"
 from app.main import (  # noqa: E402
     RELAY_PORT,
     allocate_relay_port,
+    monthly_usage_period,
     normalize_relay_ports,
     relay_port_is_available,
     relay_health_payload,
@@ -88,6 +89,20 @@ class RelayPortTests(unittest.TestCase):
             self.connection.execute(
                 "SELECT relay_port FROM leases WHERE id = 'expired'"
             ).fetchone()["relay_port"]
+        )
+
+    def test_monthly_usage_period_starts_on_the_tenth(self) -> None:
+        zone = timezone(timedelta(hours=8))
+        before_tenth = datetime(2026, 9, 9, 23, tzinfo=zone)
+        on_tenth = datetime(2026, 9, 10, 0, tzinfo=zone)
+
+        self.assertEqual(
+            monthly_usage_period(before_tenth),
+            (datetime(2026, 8, 10, tzinfo=zone).date(), datetime(2026, 9, 10, tzinfo=zone).date()),
+        )
+        self.assertEqual(
+            monthly_usage_period(on_tenth),
+            (datetime(2026, 9, 10, tzinfo=zone).date(), datetime(2026, 10, 10, tzinfo=zone).date()),
         )
 
     def test_port_availability_detects_another_active_lease(self) -> None:
