@@ -14,6 +14,7 @@ from app.main import (  # noqa: E402
     normalize_relay_ports,
     relay_port_is_available,
     relay_health_payload,
+    allocate_from_relay_candidates,
 )
 
 
@@ -112,6 +113,92 @@ class RelayPortTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertFalse(result["heartbeat_stale"])
         self.assertEqual(result["missing_ports"], [])
+
+
+class MultiRelayPortTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            """CREATE TABLE relays (
+                   id TEXT PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   host TEXT NOT NULL,
+                   port_start INTEGER NOT NULL,
+                   port_end INTEGER NOT NULL,
+                   method TEXT NOT NULL,
+                   legacy_port INTEGER NOT NULL DEFAULT 0,
+                   region TEXT NOT NULL DEFAULT '',
+                   weight INTEGER NOT NULL DEFAULT 100,
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   draining INTEGER NOT NULL DEFAULT 0,
+                   token_hash TEXT NOT NULL DEFAULT '',
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL
+               )"""
+        )
+        self.connection.execute(
+            """CREATE TABLE leases (
+                   id TEXT PRIMARY KEY,
+                   relay_id TEXT,
+                   relay_port INTEGER,
+                   expires_at TEXT NOT NULL,
+                   revoked_at TEXT
+               )"""
+        )
+        for relay_id, start, end in (("one", 30000, 30002), ("two", 30000, 30002)):
+            self.connection.execute(
+                """INSERT INTO relays(
+                       id, name, host, port_start, port_end, method,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, 'chacha20-ietf-poly1305', ?, ?)""",
+                (relay_id, relay_id, f"{relay_id}.example.com", start, end, timestamp(0), timestamp(0)),
+            )
+
+    def tearDown(self) -> None:
+        self.connection.close()
+
+    def test_same_port_can_be_used_by_different_relays(self) -> None:
+        self.connection.execute(
+            "INSERT INTO leases(id, relay_id, relay_port, expires_at) VALUES ('one-lease', 'one', 30000, ?)",
+            (timestamp(1),),
+        )
+
+        self.assertFalse(relay_port_is_available(self.connection, 30000, "other", "one"))
+        self.assertTrue(relay_port_is_available(self.connection, 30000, "other", "two"))
+        self.assertEqual(allocate_relay_port(self.connection, "two"), 30000)
+
+    def test_normalize_repairs_ports_per_relay(self) -> None:
+        for lease_id, relay_id in (("one-kept", "one"), ("one-duplicate", "one"), ("two-same", "two")):
+            self.connection.execute(
+                "INSERT INTO leases(id, relay_id, relay_port, expires_at) VALUES (?, ?, 30001, ?)",
+                (lease_id, relay_id, timestamp(1)),
+            )
+
+        normalize_relay_ports(self.connection)
+
+        rows = {
+            row["id"]: row["relay_port"]
+            for row in self.connection.execute("SELECT id, relay_port FROM leases")
+        }
+        one_values = [value for key, value in rows.items() if key.startswith("one-")]
+        self.assertEqual(len(one_values), 2)
+        self.assertIn(30001, one_values)
+        self.assertIn(None, one_values)
+        self.assertEqual(rows["two-same"], 30001)
+
+    def test_allocator_falls_back_when_first_relay_is_full(self) -> None:
+        for index, port in enumerate((30000, 30001, 30002)):
+            self.connection.execute(
+                "INSERT INTO leases(id, relay_id, relay_port, expires_at) VALUES (?, 'one', ?, ?)",
+                (f"full-{index}", port, timestamp(1)),
+            )
+
+        candidates = self.connection.execute("SELECT * FROM relays ORDER BY id").fetchall()
+        relay, port = allocate_from_relay_candidates(self.connection, candidates)
+
+        self.assertEqual(relay["id"], "two")
+        self.assertEqual(port, 30000)
 
 
 if __name__ == "__main__":

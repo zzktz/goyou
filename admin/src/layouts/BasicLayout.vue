@@ -29,6 +29,8 @@ const active = computed(() =>
     ? "/users"
     : route.path.startsWith("/leases")
       ? "/leases"
+      : route.path.startsWith("/relays")
+        ? "/relays"
       : route.path.startsWith("/traffic-logs")
         ? "/traffic-logs"
         : route.path.startsWith("/releases")
@@ -77,6 +79,9 @@ function logout() {
         >
         <a-menu-item key="/leases"
           ><CloudServerOutlined /><span>代理租约</span></a-menu-item
+        >
+        <a-menu-item key="/relays"
+          ><CloudServerOutlined /><span>Relay 管理</span></a-menu-item
         >
         <a-menu-item key="/traffic-logs"
           ><FileTextOutlined /><span>流量日志</span></a-menu-item

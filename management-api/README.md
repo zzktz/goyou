@@ -37,6 +37,10 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/settings`
 - `PATCH /v1/admin/settings`
 - `GET /v1/admin/overview`
+- `GET /v1/admin/relays`
+- `POST /v1/admin/relays`
+- `PATCH /v1/admin/relays/{relay_id}`
+- `DELETE /v1/admin/relays/{relay_id}`
 - `GET /v1/admin/users`
 - `POST /v1/admin/users`
 - `PATCH /v1/admin/users/{user_id}/status`
@@ -71,11 +75,15 @@ curl http://127.0.0.1:18080/healthz
 
 客户端生产 API 地址记录在本机 `docs/敏感信息.md`。构建客户端时可通过 `VITE_API_BASE_URL` 覆盖默认地址。
 
-新租约会分配独立 Shadowsocks 凭据和 relay 端口（默认 `30000-39999`），计量适配器通过内部同步接口读取这些租约并生成 relay 配置。旧租约会在下一次刷新时迁移到独立凭据。
+新租约会按活跃租约数与权重分配到一个已启用且未排空的 relay，并分配该 relay 端口范围内的独立 Shadowsocks 凭据和端口（默认 `30000-39999`）。计量适配器通过内部同步接口只读取自己 `RELAY_ID` 对应的租约并生成 relay 配置。旧租约会在下一次刷新时迁移到独立凭据；当原 relay 被停用或排空时，刷新会自动迁移到其他可用 relay。
+
+管理后台“Relay 管理”支持新增、编辑、启用/停用、排空和删除节点。创建节点后只显示一次 Agent Token，请写入对应 relay 的 `RELAY_ID`、`RELAY_TOKEN`；删除仅允许没有历史租约的节点，已有租约应先停用或排空并等待过期。旧部署启动时会自动创建 `default` relay，并把历史租约和旧 `relay_health` 记录迁移到该节点；原有 `METERING_TOKEN` 仍兼容默认节点，新增节点推荐使用独立 Token。
+
+多 relay 部署示例：每台 relay 使用相同的 `MANAGEMENT_API_URL`，但设置不同的 `RELAY_ID` 和后台生成的 `RELAY_TOKEN`，并为各节点配置不同的公网主机地址及端口范围。端口唯一性按 `(relay_id, relay_port)` 约束，因此不同节点可以复用相同的端口号。
 
 relay 计量适配器会定期调用心跳接口；`RELAY_HEARTBEAT_TIMEOUT_SECONDS`（默认 `30` 秒）用于判断后台总览中的心跳是否超时。
 
-每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 1000 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。`METERING_TOKEN` 只用于可信 relay 计量组件向内部接口上报上传和下载字节数；当前共享 relay 凭据尚不能区分用户，正式启用服务端限额前必须完成独立用户凭据和 relay 计量接入。
+每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 1000 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。每条租约使用独立凭据，relay 计量组件通过内部接口上报上传和下载字节数；`METERING_TOKEN` 仅作为旧版默认 relay 的兼容认证配置，新节点应使用后台生成的独立 Token。
 
 管理后台前端位于仓库 `admin/`，生产地址记录在本机 `docs/敏感信息.md`。静态文件由管理服务器 Nginx 提供，`/v1/*` 仍然反代到本 API 容器。
 

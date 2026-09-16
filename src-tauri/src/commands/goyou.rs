@@ -47,6 +47,8 @@ struct Preferences {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyLease {
+    #[serde(rename = "relay_name", default)]
+    pub relay_name: Option<String>,
     pub host: String,
     pub port: u16,
     pub method: String,
@@ -542,26 +544,36 @@ fn singbox_program(app: &AppHandle) -> Result<PathBuf, String> {
         "sing-box"
     }))
 }
-fn resolve_relay_host(host: &str, port: u16) -> Result<String, String> {
+fn relay_label(relay_name: Option<&str>) -> String {
+    relay_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("代理节点（{name}）"))
+        .unwrap_or_else(|| "代理节点".to_string())
+}
+
+fn resolve_relay_host(host: &str, port: u16, relay_name: Option<&str>) -> Result<String, String> {
+    let label = relay_label(relay_name);
     if host.parse::<IpAddr>().is_ok() {
         return Ok(host.to_owned());
     }
     let addresses = (host, port)
         .to_socket_addrs()
-        .map_err(|error| format!("无法解析代理节点地址 {host}：{error}"))?;
+        .map_err(|_| format!("{label}地址解析失败，请检查网络或节点配置。"))?;
     addresses
         .filter_map(|address| match address.ip() {
             IpAddr::V4(ip) => Some(ip.to_string()),
             IpAddr::V6(_) => None,
         })
         .next()
-        .ok_or_else(|| format!("代理节点地址 {host} 没有可用的 IPv4 地址"))
+        .ok_or_else(|| format!("{label}没有可用的 IPv4 地址。"))
 }
 
-fn ensure_relay_endpoint(host: &str, port: u16) -> Result<(), String> {
+fn ensure_relay_endpoint(host: &str, port: u16, relay_name: Option<&str>) -> Result<(), String> {
+    let label = relay_label(relay_name);
     let addresses = (host, port)
         .to_socket_addrs()
-        .map_err(|error| format!("无法连接代理节点 {host}:{port}：{error}"))?;
+        .map_err(|_| format!("{label}地址解析失败，请检查网络或节点配置。"))?;
     let mut last_error = None;
     for address in addresses {
         match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
@@ -570,7 +582,7 @@ fn ensure_relay_endpoint(host: &str, port: u16) -> Result<(), String> {
         }
     }
     Err(format!(
-        "代理节点 {host}:{port} 当前不可用{}，未启用系统代理。",
+        "{label} 当前不可用{}，未启用系统代理。",
         last_error
             .map(|error| format!("：{error}"))
             .unwrap_or_default()
@@ -776,8 +788,9 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     // Resolve the relay endpoint before enabling DNS-over-relay. Otherwise a
     // hostname relay could create a dependency cycle: remote DNS uses the
     // relay, while the relay itself still needs to be resolved.
-    let relay_host = resolve_relay_host(&lease.host, lease.port)?;
-    ensure_relay_endpoint(&relay_host, lease.port)?;
+    let relay_name = lease.relay_name.as_deref();
+    let relay_host = resolve_relay_host(&lease.host, lease.port, relay_name)?;
+    ensure_relay_endpoint(&relay_host, lease.port, relay_name)?;
     ensure_port_available()?;
     let config_path = singbox_config_file();
     fs::create_dir_all(config_path.parent().ok_or("invalid sing-box config path")?)
@@ -1312,7 +1325,7 @@ pub async fn diagnose_goyou() -> Diagnostic {
     }
     let local_proxy_reachable = port_open();
     let (upstream_reachable, upstream_error) = match configured_relay_endpoint() {
-        Some((host, port)) => match ensure_relay_endpoint(&host, port) {
+        Some((host, port)) => match ensure_relay_endpoint(&host, port, None) {
             Ok(()) => (Some(true), None),
             Err(error) => (Some(false), Some(error)),
         },
@@ -1544,11 +1557,12 @@ pub async fn control_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{singbox_config, ProxyLease};
+    use super::{ensure_relay_endpoint, singbox_config, ProxyLease};
     use std::path::Path;
 
     fn config() -> serde_json::Value {
         let lease = ProxyLease {
+            relay_name: Some("测试 Relay".into()),
             host: "relay.example.com".into(),
             port: 443,
             method: "aes-256-gcm".into(),
@@ -1602,5 +1616,13 @@ mod tests {
         assert_eq!(dns_rules[0]["server"], "local");
         assert_eq!(value["dns"]["servers"][0]["detour"], "direct");
         assert_eq!(value["dns"]["servers"][1]["detour"], "relay");
+    }
+
+    #[test]
+    fn relay_endpoint_errors_use_name_without_address() {
+        let error = ensure_relay_endpoint("127.0.0.1", 1, Some("真实代理服务器 Relay"))
+            .expect_err("port 1 should not accept a connection");
+        assert!(error.contains("代理节点（真实代理服务器 Relay） 当前不可用"));
+        assert!(!error.contains("127.0.0.1:1"));
     }
 }

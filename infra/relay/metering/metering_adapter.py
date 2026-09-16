@@ -22,7 +22,8 @@ from pathlib import Path
 
 
 MANAGEMENT_API_URL = os.environ["MANAGEMENT_API_URL"].rstrip("/")
-METERING_TOKEN = os.environ["METERING_TOKEN"]
+RELAY_ID = os.getenv("RELAY_ID", "default")
+METERING_TOKEN = os.getenv("RELAY_TOKEN", "").strip() or os.environ["METERING_TOKEN"]
 SING_BOX_BINARY = os.getenv("SING_BOX_BINARY", "sing-box")
 RELAY_CONFIG_PATH = Path(os.getenv("RELAY_CONFIG_PATH", "/var/lib/goyou/relay.json"))
 STATE_PATH = Path(os.getenv("METERING_STATE_PATH", "/var/lib/goyou/metering-state.json"))
@@ -42,7 +43,12 @@ def request_json(path: str, method: str = "GET", payload: dict | None = None) ->
         f"{MANAGEMENT_API_URL}{path}",
         data=body,
         method=method,
-        headers={"Accept": "application/json", "Content-Type": "application/json", "X-Metering-Token": METERING_TOKEN},
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Metering-Token": METERING_TOKEN,
+            "X-Relay-ID": RELAY_ID,
+        },
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -75,7 +81,8 @@ def save_state(state: dict[str, dict[str, int]]) -> None:
     write_json_atomic(STATE_PATH, state)
 
 
-def relay_config(leases: list[dict]) -> dict:
+def relay_config(leases: list[dict], method: str | None = None) -> dict:
+    configured_method = (method or RELAY_METHOD).strip() or RELAY_METHOD
     inbounds = []
     seen_ports: set[int] = set()
     if LEGACY_RELAY_PASSWORD:
@@ -85,7 +92,7 @@ def relay_config(leases: list[dict]) -> dict:
                 "tag": "legacy-static",
                 "listen": "0.0.0.0",
                 "listen_port": LEGACY_RELAY_PORT,
-                "method": RELAY_METHOD,
+                "method": configured_method,
                 "password": LEGACY_RELAY_PASSWORD,
             }
         )
@@ -105,7 +112,7 @@ def relay_config(leases: list[dict]) -> dict:
                 "tag": f"lease-{lease['lease_id']}",
                 "listen": "0.0.0.0",
                 "listen_port": port,
-                "method": RELAY_METHOD,
+                "method": configured_method,
                 "password": lease["password"],
             }
         )
@@ -367,7 +374,8 @@ def main() -> None:
                 payload = request_json("/v1/internal/relay/leases")
                 leases = payload.get("leases", [])
                 lease_id_to_user = {lease["lease_id"]: lease["user_id"] for lease in leases}
-                generated = relay_config(leases)
+                relay_method = payload.get("method") if isinstance(payload.get("method"), str) else None
+                generated = relay_config(leases, relay_method)
                 fingerprint = config_fingerprint(generated)
                 if fingerprint != previous_fingerprint:
                     stop_child(child)

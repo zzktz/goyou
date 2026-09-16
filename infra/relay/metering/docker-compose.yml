@@ -8,6 +8,8 @@ services:
       - .env
     environment:
       MANAGEMENT_API_URL: ${MANAGEMENT_API_URL}
+      RELAY_ID: ${RELAY_ID:-default}
+      RELAY_TOKEN: ${RELAY_TOKEN:-}
       METERING_TOKEN: ${METERING_TOKEN}
       RELAY_CONFIG_PATH: /var/lib/goyou/relay.json
       METERING_STATE_PATH: /var/lib/goyou/metering-state.json

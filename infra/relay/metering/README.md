@@ -2,7 +2,7 @@
 
 `metering_adapter.py` 是 relay 侧的可信适配器，负责：
 
-1. 使用 `GET /v1/internal/relay/leases` 同步有效租约；
+1. 使用 `GET /v1/internal/relay/leases` 同步属于本 relay 的有效租约；
 2. 为每条租约生成独立 Shadowsocks 入站和端口配置；
 3. 启用 sing-box Clash API，轮询连接上传/下载计数；
 4. 将增量流量及连接目标域名、端口通过 `X-Metering-Token` 上报 `/v1/internal/usage/report`；
@@ -12,6 +12,8 @@
 
 ```bash
 export MANAGEMENT_API_URL=https://proxy.example.com
+export RELAY_ID=default
+export RELAY_TOKEN='relay-token-from-admin-console'
 export METERING_TOKEN='server-only-token'
 export RELAY_CONFIG_PATH=/var/lib/goyou/relay.json
 export METERING_STATE_PATH=/var/lib/goyou/metering-state.json
@@ -19,7 +21,7 @@ export EGRESS_HOST=127.0.0.1
 export EGRESS_PORT=19080
 ```
 
-适配器需要与 `sing-box` 二进制位于同一 relay 主机，且管理 API 的 `METERING_TOKEN` 必须只配置在该主机，不能放入客户端或公开仓库。
+适配器需要与 `sing-box` 二进制位于同一 relay 主机。每台 relay 应使用管理后台为该节点生成的独立 `RELAY_ID` 和 `RELAY_TOKEN`；旧版单 relay 部署仍可使用共享 `METERING_TOKEN` 兼容运行。
 
 ## 注意
 

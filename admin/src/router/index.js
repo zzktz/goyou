@@ -5,6 +5,7 @@ import LoginPage from "@/pages/LoginPage.vue";
 import DashboardPage from "@/pages/DashboardPage.vue";
 import UsersPage from "@/pages/UsersPage.vue";
 import LeasesPage from "@/pages/LeasesPage.vue";
+import RelaysPage from "@/pages/RelaysPage.vue";
 import SettingsPage from "@/pages/SettingsPage.vue";
 import ProfilePage from "@/pages/ProfilePage.vue";
 import TrafficLogsPage from "@/pages/TrafficLogsPage.vue";
@@ -27,6 +28,7 @@ const router = createRouter({
         },
         { path: "users", component: UsersPage, meta: { title: "用户管理" } },
         { path: "leases", component: LeasesPage, meta: { title: "代理租约" } },
+        { path: "relays", component: RelaysPage, meta: { title: "Relay 管理" } },
         {
           path: "traffic-logs",
           component: TrafficLogsPage,

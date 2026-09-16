@@ -17,6 +17,8 @@ export interface AuthSession {
 
 export interface ProxyLease {
   lease_id: string;
+  relay_id?: string;
+  relay_name?: string;
   host: string;
   port: number;
   method: string;
@@ -103,6 +105,11 @@ export function formatErrorMessage(error: unknown): string {
     .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/giu, "请求地址")
     .replace(
       /\b(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+[a-z]{2,63}(?::\d+)?(?:[/?#][^\s"'<>)]*)?/giu,
+      "请求地址",
+    )
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/gu, "请求地址")
+    .replace(
+      /\[(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\](?::\d{1,5})?/giu,
       "请求地址",
     )
     .replace(/\s{2,}/g, " ")

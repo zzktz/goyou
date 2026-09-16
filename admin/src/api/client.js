@@ -13,6 +13,8 @@ function formatErrorMessage(value) {
       '请求地址',
     )
     .replace(/\s{2,}/g, ' ')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b/gu, '请求地址')
+    .replace(/\[(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\](?::\d{1,5})?/giu, '请求地址')
     .trim()
 }
 

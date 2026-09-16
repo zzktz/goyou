@@ -48,6 +48,7 @@ RELAY_PORT_START = int(os.getenv("RELAY_PORT_START", "30000"))
 RELAY_PORT_END = int(os.getenv("RELAY_PORT_END", "39999"))
 RELAY_METHOD = os.getenv("RELAY_METHOD", "chacha20-ietf-poly1305")
 RELAY_PASSWORD = os.getenv("RELAY_PASSWORD", "")
+DEFAULT_RELAY_ID = "default"
 RELAY_HEARTBEAT_TIMEOUT_SECONDS = max(
     10, min(int(os.getenv("RELAY_HEARTBEAT_TIMEOUT_SECONDS", "30")), 300)
 )
@@ -205,39 +206,107 @@ def ensure_user_quota(connection: sqlite3.Connection, user_id: str) -> sqlite3.R
     return connection.execute("SELECT * FROM user_quotas WHERE user_id = ?", (user_id,)).fetchone()
 
 
-def allocate_relay_port(connection: sqlite3.Connection) -> int:
+def relay_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def relay_columns(connection: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in connection.execute("PRAGMA table_info(relays)").fetchall()}
+
+
+def relay_row(connection: sqlite3.Connection, relay_id: str) -> sqlite3.Row | None:
+    if not relay_columns(connection):
+        return None
+    return connection.execute("SELECT * FROM relays WHERE id = ?", (relay_id,)).fetchone()
+
+
+def relay_config(connection: sqlite3.Connection, relay_id: str | None) -> dict[str, object]:
+    row = relay_row(connection, relay_id or DEFAULT_RELAY_ID)
+    if row:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "host": row["host"],
+            "port_start": int(row["port_start"]),
+            "port_end": int(row["port_end"]),
+            "method": row["method"],
+            "legacy_port": int(row["legacy_port"] or 0),
+        }
+    return {
+        "id": DEFAULT_RELAY_ID,
+        "name": "默认 relay",
+        "host": RELAY_HOST,
+        "port_start": RELAY_PORT_START,
+        "port_end": RELAY_PORT_END,
+        "method": RELAY_METHOD,
+        "legacy_port": RELAY_PORT,
+    }
+
+
+def relay_active(connection: sqlite3.Connection, relay_id: str) -> bool:
+    row = relay_row(connection, relay_id)
+    return bool(row and row["enabled"] and not row["draining"])
+
+
+def allocate_relay_port(connection: sqlite3.Connection, relay_id: str = DEFAULT_RELAY_ID) -> int:
     # Expired or revoked leases must not reserve a port forever. Clearing the
     # value also keeps the unique index below compatible with SQLite's lease
     # lifecycle, where an expired lease can later be refreshed.
-    connection.execute(
-        """UPDATE leases SET relay_port = NULL
-           WHERE relay_port IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
-        (iso(now()),),
-    )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
+    relay = relay_config(connection, relay_id)
+    if "relay_id" in columns:
+        connection.execute(
+            """UPDATE leases SET relay_port = NULL
+               WHERE relay_id = ? AND relay_port IS NOT NULL
+                 AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
+            (relay_id, iso(now())),
+        )
+    else:
+        connection.execute(
+            """UPDATE leases SET relay_port = NULL
+               WHERE relay_port IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
+            (iso(now()),),
+        )
+    start = int(relay["port_start"])
+    end = int(relay["port_end"])
+    reserved_port = int(relay["legacy_port"] or 0)
+    where_relay = " AND relay_id = ?" if "relay_id" in columns else ""
+    params: tuple[object, ...] = (iso(now()), relay_id) if "relay_id" in columns else (iso(now()),)
     used = {
         int(row[0])
         for row in connection.execute(
-            "SELECT relay_port FROM leases WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL",
-            (iso(now()),),
+            f"SELECT relay_port FROM leases WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL{where_relay}",
+            params,
         ).fetchall()
     }
-    for port in range(RELAY_PORT_START, RELAY_PORT_END + 1):
-        if port != RELAY_PORT and port not in used:
+    for port in range(start, end + 1):
+        if port != reserved_port and port not in used:
             return port
     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="代理节点当前没有可用端口")
 
 
 def relay_port_is_available(
-    connection: sqlite3.Connection, port: int | None, lease_id: str | None = None
+    connection: sqlite3.Connection,
+    port: int | None,
+    lease_id: str | None = None,
+    relay_id: str = DEFAULT_RELAY_ID,
 ) -> bool:
-    if port is None or port == RELAY_PORT or not RELAY_PORT_START <= port <= RELAY_PORT_END:
+    relay = relay_config(connection, relay_id)
+    if (
+        port is None
+        or port == int(relay["legacy_port"] or 0)
+        or not int(relay["port_start"]) <= port <= int(relay["port_end"])
+    ):
         return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
+    relay_filter = " AND relay_id = ?" if "relay_id" in columns else ""
+    params: tuple[object, ...] = (port, iso(now()), lease_id, lease_id, relay_id) if "relay_id" in columns else (port, iso(now()), lease_id, lease_id)
     row = connection.execute(
-        """SELECT 1 FROM leases
+        f"""SELECT 1 FROM leases
            WHERE relay_port = ? AND revoked_at IS NULL AND expires_at > ?
-             AND (? IS NULL OR id != ?)
+             AND (? IS NULL OR id != ?){relay_filter}
            LIMIT 1""",
-        (port, iso(now()), lease_id, lease_id),
+        params,
     ).fetchone()
     return row is None
 
@@ -245,6 +314,41 @@ def relay_port_is_available(
 def normalize_relay_ports(connection: sqlite3.Connection) -> None:
     """Release stale ports and repair duplicates left by older deployments."""
     current = iso(now())
+    lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
+    if "relay_id" in lease_columns:
+        connection.execute(
+            "UPDATE leases SET relay_id = ? WHERE relay_id IS NULL OR relay_id = ''",
+            (DEFAULT_RELAY_ID,),
+        )
+        connection.execute(
+            """UPDATE leases SET relay_port = NULL
+               WHERE relay_port IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
+            (current,),
+        )
+        relays = {
+            row["id"]: row
+            for row in connection.execute("SELECT * FROM relays").fetchall()
+        }
+        active = connection.execute(
+            """SELECT id, relay_id, relay_port FROM leases
+               WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL
+               ORDER BY expires_at ASC, id ASC""",
+            (current,),
+        ).fetchall()
+        seen: dict[str, set[int]] = {}
+        for lease in active:
+            relay = relays.get(lease["relay_id"])
+            if not relay:
+                connection.execute("UPDATE leases SET relay_id = ?, relay_port = NULL WHERE id = ?", (DEFAULT_RELAY_ID, lease["id"]))
+                continue
+            port = int(lease["relay_port"])
+            valid = int(relay["port_start"]) <= port <= int(relay["port_end"]) and port != int(relay["legacy_port"] or 0)
+            relay_seen = seen.setdefault(lease["relay_id"], set())
+            if not valid or port in relay_seen:
+                connection.execute("UPDATE leases SET relay_port = NULL WHERE id = ?", (lease["id"],))
+            else:
+                relay_seen.add(port)
+        return
     connection.execute(
         """UPDATE leases SET relay_port = NULL
            WHERE relay_port IS NOT NULL
@@ -343,12 +447,29 @@ def init_db() -> None:
                 sent_at TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS relays (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port_start INTEGER NOT NULL,
+                port_end INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                legacy_port INTEGER NOT NULL DEFAULT 0,
+                region TEXT NOT NULL DEFAULT '',
+                weight INTEGER NOT NULL DEFAULT 100,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                draining INTEGER NOT NULL DEFAULT 0,
+                token_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS leases (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 device_id TEXT,
                 username TEXT NOT NULL,
                 password TEXT NOT NULL,
+                relay_id TEXT REFERENCES relays(id),
                 relay_port INTEGER,
                 expires_at TEXT NOT NULL,
                 revoked_at TEXT
@@ -430,7 +551,8 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS relay_health (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                relay_id TEXT NOT NULL UNIQUE REFERENCES relays(id) ON DELETE CASCADE,
                 last_seen_at TEXT NOT NULL,
                 process_running INTEGER NOT NULL DEFAULT 0,
                 listen_ports TEXT NOT NULL DEFAULT '[]',
@@ -446,6 +568,63 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_feedback_status_created ON feedback(status, created_at DESC);
             """
         )
+        # Create the compatibility relay before migrating relay_health because
+        # the new health table has a foreign key to relays(id).
+        relay_created_at = iso(now())
+        default_token_hash = relay_token_hash(METERING_TOKEN) if METERING_TOKEN else ""
+        connection.execute(
+            """INSERT OR IGNORE INTO relays(
+                   id, name, host, port_start, port_end, method, legacy_port,
+                   region, weight, enabled, draining, token_hash, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)""",
+            (
+                DEFAULT_RELAY_ID,
+                "默认 relay",
+                RELAY_HOST,
+                RELAY_PORT_START,
+                RELAY_PORT_END,
+                RELAY_METHOD,
+                RELAY_PORT,
+                "",
+                100,
+                default_token_hash,
+                relay_created_at,
+                relay_created_at,
+            ),
+        )
+        relay_health_columns = {row[1] for row in connection.execute("PRAGMA table_info(relay_health)").fetchall()}
+        if relay_health_columns and "relay_id" not in relay_health_columns:
+            connection.execute("ALTER TABLE relay_health RENAME TO relay_health_legacy")
+            connection.execute(
+                """CREATE TABLE relay_health (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       relay_id TEXT NOT NULL UNIQUE REFERENCES relays(id) ON DELETE CASCADE,
+                       last_seen_at TEXT NOT NULL,
+                       process_running INTEGER NOT NULL DEFAULT 0,
+                       listen_ports TEXT NOT NULL DEFAULT '[]',
+                       duplicate_ports TEXT NOT NULL DEFAULT '[]',
+                       lease_count INTEGER NOT NULL DEFAULT 0,
+                       error TEXT
+                   )"""
+            )
+            legacy_health = connection.execute("SELECT * FROM relay_health_legacy WHERE id = 1").fetchone()
+            if legacy_health:
+                connection.execute(
+                    """INSERT INTO relay_health(
+                           id, relay_id, last_seen_at, process_running,
+                           listen_ports, duplicate_ports, lease_count, error
+                       ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        DEFAULT_RELAY_ID,
+                        legacy_health["last_seen_at"],
+                        legacy_health["process_running"],
+                        legacy_health["listen_ports"],
+                        legacy_health["duplicate_ports"],
+                        legacy_health["lease_count"],
+                        legacy_health["error"],
+                    ),
+                )
+            connection.execute("DROP TABLE relay_health_legacy")
         connection.execute(
             "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
             (REGISTRATION_SETTING_KEY, "1", iso(now())),
@@ -468,11 +647,21 @@ def init_db() -> None:
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
         if "relay_port" not in lease_columns:
             connection.execute("ALTER TABLE leases ADD COLUMN relay_port INTEGER")
+        if "relay_id" not in lease_columns:
+            connection.execute("ALTER TABLE leases ADD COLUMN relay_id TEXT")
+        connection.execute(
+            "UPDATE leases SET relay_id = ? WHERE relay_id IS NULL OR relay_id = ''",
+            (DEFAULT_RELAY_ID,),
+        )
+        connection.execute("DROP INDEX IF EXISTS idx_leases_relay_port")
         normalize_relay_ports(connection)
         connection.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_relay_port
-               ON leases(relay_port)
+               ON leases(relay_id, relay_port)
                WHERE revoked_at IS NULL AND relay_port IS NOT NULL"""
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_leases_relay_id ON leases(relay_id)"
         )
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
         added_expiry_column = "account_expires_at" not in user_columns
@@ -617,6 +806,32 @@ class AdminAccountExpiryRequest(BaseModel):
     account_expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
+class AdminRelayCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    host: str = Field(min_length=1, max_length=255)
+    port_start: int = Field(default=30000, ge=1, le=65535)
+    port_end: int = Field(default=39999, ge=1, le=65535)
+    method: str = Field(default=RELAY_METHOD, min_length=1, max_length=100)
+    legacy_port: int = Field(default=0, ge=0, le=65535)
+    region: str = Field(default="", max_length=80)
+    weight: int = Field(default=100, ge=1, le=1000)
+    enabled: bool = True
+
+
+class AdminRelayUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port_start: int | None = Field(default=None, ge=1, le=65535)
+    port_end: int | None = Field(default=None, ge=1, le=65535)
+    method: str | None = Field(default=None, min_length=1, max_length=100)
+    legacy_port: int | None = Field(default=None, ge=0, le=65535)
+    region: str | None = Field(default=None, max_length=80)
+    weight: int | None = Field(default=None, ge=1, le=1000)
+    enabled: bool | None = None
+    draining: bool | None = None
+    regenerate_token: bool = False
+
+
 class AdminReleaseCreateRequest(BaseModel):
     version: str = Field(pattern=r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$", max_length=64)
     notes: str = Field(default="", max_length=10000)
@@ -748,9 +963,23 @@ def current_admin(credentials: Annotated[HTTPAuthorizationCredentials | None, De
 
 def current_metering_agent(
     token: Annotated[str | None, Header(alias="X-Metering-Token")] = None,
-) -> None:
-    if not METERING_TOKEN or not token or not secrets.compare_digest(token, METERING_TOKEN):
+    relay_id: Annotated[str | None, Header(alias="X-Relay-ID")] = None,
+) -> sqlite3.Row:
+    requested_relay_id = relay_id.strip() if relay_id and relay_id.strip() else DEFAULT_RELAY_ID
+    with db() as connection:
+        relay = relay_row(connection, requested_relay_id)
+    if not relay or not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="计量服务未授权")
+    configured_hash = str(relay["token_hash"] or "")
+    valid = bool(configured_hash) and secrets.compare_digest(relay_token_hash(token), configured_hash)
+    # Keep the original shared token working only when the default relay has
+    # no dedicated token yet. Regenerating a token must revoke the old shared
+    # credential instead of silently accepting it as a second token.
+    if not valid and requested_relay_id == DEFAULT_RELAY_ID and not configured_hash:
+        valid = bool(METERING_TOKEN) and secrets.compare_digest(token, METERING_TOKEN)
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="计量服务未授权")
+    return relay
 
 
 def verify_admin_password(password: str, configured_hash: str | None = None) -> bool:
@@ -1316,6 +1545,55 @@ def register_device(payload: DeviceRequest, user: Annotated[sqlite3.Row, Depends
     return {"device_id": secrets.token_hex(16), "name": payload.name, "platform": payload.platform, "user_id": user["id"]}
 
 
+def select_relay_candidates(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    return connection.execute(
+        """SELECT r.*, COUNT(l.id) AS active_lease_count
+           FROM relays r
+           LEFT JOIN leases l ON l.relay_id = r.id
+             AND l.revoked_at IS NULL AND l.expires_at > ?
+           WHERE r.enabled = 1 AND r.draining = 0
+           GROUP BY r.id
+           ORDER BY (COUNT(l.id) * 1.0 / CASE WHEN r.weight > 0 THEN r.weight ELSE 1 END) ASC,
+                    r.created_at ASC, r.id ASC""",
+        (iso(now()),),
+    ).fetchall()
+
+
+def select_relay(connection: sqlite3.Connection) -> sqlite3.Row:
+    candidates = select_relay_candidates(connection)
+    if not candidates:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前没有可用的代理节点")
+    return candidates[0]
+
+
+def allocate_from_relay_candidates(
+    connection: sqlite3.Connection,
+    candidates: list[sqlite3.Row],
+) -> tuple[sqlite3.Row, int]:
+    for relay in candidates:
+        try:
+            return relay, allocate_relay_port(connection, relay["id"])
+        except HTTPException as error:
+            if error.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
+                raise
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="当前没有可用的代理节点端口")
+
+
+def lease_response(lease: sqlite3.Row, relay: sqlite3.Row) -> dict[str, object]:
+    return {
+        "lease_id": lease["id"],
+        "device_id": lease["device_id"],
+        "relay_id": relay["id"],
+        "relay_name": relay["name"],
+        "host": relay["host"],
+        "port": lease["relay_port"],
+        "method": relay["method"],
+        "username": lease["username"],
+        "password": lease["password"],
+        "expires_at": lease["expires_at"],
+    }
+
+
 @app.post("/v1/proxy/lease")
 def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(current_user)]) -> dict:
     if account_is_expired(user["account_expires_at"]):
@@ -1325,21 +1603,15 @@ def create_lease(payload: LeaseRequest, user: Annotated[sqlite3.Row, Depends(cur
     username, password = new_relay_credentials(lease_id)
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        relay_port = allocate_relay_port(connection)
+        relay, relay_port = allocate_from_relay_candidates(connection, select_relay_candidates(connection))
         connection.execute(
-            "INSERT INTO leases(id, user_id, device_id, username, password, relay_port, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (lease_id, user["id"], payload.device_id, username, password, relay_port, iso(expires)),
+            """INSERT INTO leases(
+                   id, user_id, device_id, username, password, relay_id, relay_port, expires_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (lease_id, user["id"], payload.device_id, username, password, relay["id"], relay_port, iso(expires)),
         )
-    return {
-        "lease_id": lease_id,
-        "host": RELAY_HOST,
-        "port": relay_port,
-        "method": RELAY_METHOD,
-        "username": username,
-        "password": password,
-        "expires_at": iso(expires),
-        "quota_exceeded": user_usage(user["id"])["exceeded"],
-    }
+        lease = connection.execute("SELECT * FROM leases WHERE id = ?", (lease_id,)).fetchone()
+    return {**lease_response(lease, relay), "quota_exceeded": user_usage(user["id"])["exceeded"]}
 
 
 @app.post("/v1/proxy/lease/refresh")
@@ -1349,44 +1621,50 @@ def refresh_lease(payload: LeaseRefreshRequest, user: Annotated[sqlite3.Row, Dep
     expires = now() + timedelta(hours=1)
     with db() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        lease = connection.execute("SELECT id, device_id, username, password, relay_port, revoked_at FROM leases WHERE id = ? AND user_id = ?", (payload.lease_id, user["id"])).fetchone()
+        lease = connection.execute(
+            """SELECT id, device_id, username, password, relay_id, relay_port,
+                      expires_at, revoked_at
+               FROM leases WHERE id = ? AND user_id = ?""",
+            (payload.lease_id, user["id"]),
+        ).fetchone()
         if not lease or lease["revoked_at"]:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="租约不存在或已撤销")
+        current_relay = relay_row(connection, lease["relay_id"] or DEFAULT_RELAY_ID)
+        current_relay_active = bool(current_relay and relay_active(connection, current_relay["id"]))
+        relay = current_relay if current_relay_active else None
         username = lease["username"]
         password = lease["password"]
         relay_port = lease["relay_port"]
+        if relay is None:
+            relay, relay_port = allocate_from_relay_candidates(connection, select_relay_candidates(connection))
         if (
             username == "relay"
             or password == RELAY_PASSWORD
-            or not relay_port_is_available(connection, relay_port, payload.lease_id)
+            or relay["id"] != (lease["relay_id"] or DEFAULT_RELAY_ID)
+            or not relay_port_is_available(connection, relay_port, payload.lease_id, relay["id"])
         ):
-            relay_port = (
-                relay_port
-                if relay_port_is_available(connection, relay_port, payload.lease_id)
-                else allocate_relay_port(connection)
-            )
+            if not relay_port_is_available(connection, relay_port, payload.lease_id, relay["id"]):
+                try:
+                    relay_port = allocate_relay_port(connection, relay["id"])
+                except HTTPException as error:
+                    if error.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
+                        raise
+                    alternatives = [candidate for candidate in select_relay_candidates(connection) if candidate["id"] != relay["id"]]
+                    relay, relay_port = allocate_from_relay_candidates(connection, alternatives)
             username, password = new_relay_credentials(payload.lease_id)
         connection.execute(
-            "UPDATE leases SET expires_at = ?, username = ?, password = ?, relay_port = ? WHERE id = ?",
-            (iso(expires), username, password, relay_port, payload.lease_id),
+            """UPDATE leases SET expires_at = ?, username = ?, password = ?,
+                      relay_id = ?, relay_port = ? WHERE id = ?""",
+            (iso(expires), username, password, relay["id"], relay_port, payload.lease_id),
         )
-    return {
-        "lease_id": payload.lease_id,
-        "device_id": lease["device_id"],
-        "host": RELAY_HOST,
-        "port": relay_port,
-        "method": RELAY_METHOD,
-        "username": username,
-        "password": password,
-        "expires_at": iso(expires),
-        "quota_exceeded": user_usage(user["id"])["exceeded"],
-    }
+        refreshed = connection.execute("SELECT * FROM leases WHERE id = ?", (payload.lease_id,)).fetchone()
+    return {**lease_response(refreshed, relay), "quota_exceeded": user_usage(user["id"])["exceeded"]}
 
 
 @app.post("/v1/internal/usage/report")
 def report_usage(
     payload: UsageReportRequest,
-    _agent: Annotated[None, Depends(current_metering_agent)],
+    agent: Annotated[sqlite3.Row, Depends(current_metering_agent)],
 ) -> dict:
     with db() as connection:
         user = connection.execute("SELECT id, disabled FROM users WHERE id = ?", (payload.user_id,)).fetchone()
@@ -1397,11 +1675,13 @@ def report_usage(
         lease_device_id = None
         if payload.lease_id:
             lease = connection.execute(
-                "SELECT user_id, device_id FROM leases WHERE id = ? AND revoked_at IS NULL",
+                "SELECT user_id, device_id, relay_id FROM leases WHERE id = ? AND revoked_at IS NULL",
                 (payload.lease_id,),
             ).fetchone()
             if not lease or lease["user_id"] != payload.user_id:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="租约与用户不匹配")
+            if lease["relay_id"] and lease["relay_id"] != agent["id"]:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="租约不属于当前 relay")
             lease_device_id = lease["device_id"]
         if payload.upload_bytes == 0 and payload.download_bytes == 0:
             return usage_payload(connection, payload.user_id)
@@ -1450,17 +1730,17 @@ def report_usage(
 @app.post("/v1/internal/relay/heartbeat")
 def relay_heartbeat(
     payload: RelayHeartbeatRequest,
-    _agent: Annotated[None, Depends(current_metering_agent)],
+    agent: Annotated[sqlite3.Row, Depends(current_metering_agent)],
 ) -> dict[str, object]:
     listen_ports = sorted({port for port in payload.listen_ports if 1 <= port <= 65535})
     duplicate_ports = sorted({port for port in payload.duplicate_ports if 1 <= port <= 65535})
     with db() as connection:
         connection.execute(
             """INSERT INTO relay_health(
-                   id, last_seen_at, process_running, listen_ports,
+                   relay_id, last_seen_at, process_running, listen_ports,
                    duplicate_ports, lease_count, error
-               ) VALUES (1, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(relay_id) DO UPDATE SET
                    last_seen_at = excluded.last_seen_at,
                    process_running = excluded.process_running,
                    listen_ports = excluded.listen_ports,
@@ -1468,6 +1748,7 @@ def relay_heartbeat(
                    lease_count = excluded.lease_count,
                    error = excluded.error""",
             (
+                agent["id"],
                 iso(now()),
                 int(payload.process_running),
                 json.dumps(listen_ports),
@@ -1481,7 +1762,7 @@ def relay_heartbeat(
 
 @app.get("/v1/internal/relay/leases")
 def relay_leases(
-    _agent: Annotated[None, Depends(current_metering_agent)],
+    agent: Annotated[sqlite3.Row, Depends(current_metering_agent)],
 ) -> dict:
     with db() as connection:
         rows = connection.execute(
@@ -1490,16 +1771,17 @@ def relay_leases(
                FROM leases l JOIN users u ON u.id = l.user_id
                LEFT JOIN user_quotas q ON q.user_id = l.user_id
                LEFT JOIN daily_usage d ON d.user_id = l.user_id AND d.usage_date = ?
-               WHERE l.revoked_at IS NULL AND l.expires_at > ? AND u.disabled = 0
+               WHERE l.relay_id = ? AND l.revoked_at IS NULL AND l.expires_at > ? AND u.disabled = 0
                  AND (u.account_expires_at IS NULL OR u.account_expires_at > ?)
                  AND l.relay_port IS NOT NULL AND l.username != 'relay'
                  AND (d.total_bytes IS NULL OR d.total_bytes < COALESCE(q.daily_limit_bytes, ?))""",
-            (usage_date(), iso(now()), iso(now()), DEFAULT_DAILY_QUOTA_BYTES),
+            (usage_date(), agent["id"], iso(now()), iso(now()), DEFAULT_DAILY_QUOTA_BYTES),
         ).fetchall()
     return {
         "generated_at": iso(now()),
-        "host": RELAY_HOST,
-        "method": RELAY_METHOD,
+        "relay_id": agent["id"],
+        "host": agent["host"],
+        "method": agent["method"],
         "leases": [
             {
                 "lease_id": row["id"],
@@ -1959,9 +2241,16 @@ def lease_state(row: sqlite3.Row) -> str:
 
 
 def relay_health_payload(
-    connection: sqlite3.Connection, active_ports: set[int]
+    connection: sqlite3.Connection,
+    active_ports: set[int],
+    relay_id: str = DEFAULT_RELAY_ID,
 ) -> dict[str, object]:
-    row = connection.execute("SELECT * FROM relay_health WHERE id = 1").fetchone()
+    health_columns = {item[1] for item in connection.execute("PRAGMA table_info(relay_health)").fetchall()}
+    row = (
+        connection.execute("SELECT * FROM relay_health WHERE relay_id = ?", (relay_id,)).fetchone()
+        if "relay_id" in health_columns
+        else connection.execute("SELECT * FROM relay_health WHERE id = 1").fetchone()
+    )
     heartbeat_age: float | None = None
     listen_ports: list[int] = []
     duplicate_ports: list[int] = []
@@ -2007,20 +2296,50 @@ def relay_health_payload(
     }
 
 
+def relay_admin_payload(connection: sqlite3.Connection, relay: sqlite3.Row) -> dict[str, object]:
+    active_rows = connection.execute(
+        """SELECT relay_port FROM leases
+           WHERE relay_id = ? AND revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL""",
+        (relay["id"], iso(now())),
+    ).fetchall()
+    total_leases = connection.execute(
+        "SELECT COUNT(*) FROM leases WHERE relay_id = ?",
+        (relay["id"],),
+    ).fetchone()[0]
+    payload = {
+        "id": relay["id"],
+        "name": relay["name"],
+        "host": relay["host"],
+        "port_start": int(relay["port_start"]),
+        "port_end": int(relay["port_end"]),
+        "method": relay["method"],
+        "legacy_port": int(relay["legacy_port"] or 0),
+        "region": relay["region"],
+        "weight": int(relay["weight"]),
+        "enabled": bool(relay["enabled"]),
+        "draining": bool(relay["draining"]),
+        "active_lease_count": len(active_rows),
+        "total_lease_count": int(total_leases),
+        "health": relay_health_payload(
+            connection,
+            {int(row["relay_port"]) for row in active_rows},
+            relay["id"],
+        ),
+        "created_at": relay["created_at"],
+        "updated_at": relay["updated_at"],
+    }
+    return payload
+
+
 @app.get("/v1/admin/overview")
 def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
     with db() as connection:
         users = connection.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN disabled = 0 THEN 1 ELSE 0 END) AS enabled FROM users").fetchone()
         leases = connection.execute("SELECT id, expires_at, revoked_at FROM leases").fetchall()
-        active_port_rows = connection.execute(
-            """SELECT relay_port FROM leases
-               WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL""",
-            (iso(now()),),
-        ).fetchall()
         refresh_tokens = connection.execute("SELECT COUNT(*) AS total FROM refresh_tokens WHERE revoked_at IS NULL AND expires_at > ?", (iso(now()),)).fetchone()["total"]
-        relay_status = relay_health_payload(
-            connection, {int(row["relay_port"]) for row in active_port_rows}
-        )
+        relay_rows = connection.execute("SELECT * FROM relays ORDER BY created_at ASC, id ASC").fetchall()
+        relay_payloads = [relay_admin_payload(connection, relay) for relay in relay_rows]
+        default_relay = next((item for item in relay_payloads if item["id"] == DEFAULT_RELAY_ID), relay_payloads[0] if relay_payloads else None)
     states = {"active": 0, "expired": 0, "revoked": 0, "unknown": 0}
     for lease in leases:
         states[lease_state(lease)] += 1
@@ -2028,18 +2347,128 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
         "service": {
             "name": APP_NAME,
             "status": "ok",
-            "relay_host": RELAY_HOST,
-            "relay_port": RELAY_PORT,
-            "relay_port_start": RELAY_PORT_START,
-            "relay_port_end": RELAY_PORT_END,
-            "relay_method": RELAY_METHOD,
+            "relay_host": default_relay["host"] if default_relay else RELAY_HOST,
+            "relay_port": default_relay["legacy_port"] if default_relay else RELAY_PORT,
+            "relay_port_start": default_relay["port_start"] if default_relay else RELAY_PORT_START,
+            "relay_port_end": default_relay["port_end"] if default_relay else RELAY_PORT_END,
+            "relay_method": default_relay["method"] if default_relay else RELAY_METHOD,
         },
-        "relay": relay_status,
+        "relay": default_relay["health"] if default_relay else relay_health_payload(connection, set()),
+        "relays": relay_payloads,
         "users": {"total": users["total"], "enabled": users["enabled"] or 0, "disabled": (users["total"] or 0) - (users["enabled"] or 0)},
         "leases": {"total": len(leases), **states},
         "active_refresh_tokens": refresh_tokens,
         "generated_at": iso(now()),
     }
+
+
+def validate_relay_ports(port_start: int, port_end: int) -> None:
+    if port_start > port_end:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="端口起始值不能大于结束值")
+
+
+@app.get("/v1/admin/relays")
+def admin_relays(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict[str, object]:
+    with db() as connection:
+        relays = connection.execute("SELECT * FROM relays ORDER BY created_at ASC, id ASC").fetchall()
+        return {"items": [relay_admin_payload(connection, relay) for relay in relays]}
+
+
+@app.post("/v1/admin/relays", status_code=status.HTTP_201_CREATED)
+def admin_create_relay(
+    payload: AdminRelayCreateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict[str, object]:
+    validate_relay_ports(payload.port_start, payload.port_end)
+    relay_id = f"relay-{secrets.token_hex(8)}"
+    token = secrets.token_urlsafe(32)
+    created_at = iso(now())
+    with db() as connection:
+        connection.execute(
+            """INSERT INTO relays(
+                   id, name, host, port_start, port_end, method, legacy_port,
+                   region, weight, enabled, draining, token_hash, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+            (
+                relay_id,
+                payload.name.strip(),
+                payload.host.strip(),
+                payload.port_start,
+                payload.port_end,
+                payload.method.strip(),
+                payload.legacy_port,
+                payload.region.strip(),
+                payload.weight,
+                int(payload.enabled),
+                relay_token_hash(token),
+                created_at,
+                created_at,
+            ),
+        )
+        relay = connection.execute("SELECT * FROM relays WHERE id = ?", (relay_id,)).fetchone()
+        return {"relay": relay_admin_payload(connection, relay), "token": token}
+
+
+@app.patch("/v1/admin/relays/{relay_id}")
+def admin_update_relay(
+    relay_id: str,
+    payload: AdminRelayUpdateRequest,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> dict[str, object]:
+    with db() as connection:
+        relay = relay_row(connection, relay_id)
+        if not relay:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="relay 不存在")
+        values = {
+            "name": payload.name.strip() if payload.name is not None else relay["name"],
+            "host": payload.host.strip() if payload.host is not None else relay["host"],
+            "port_start": payload.port_start if payload.port_start is not None else int(relay["port_start"]),
+            "port_end": payload.port_end if payload.port_end is not None else int(relay["port_end"]),
+            "method": payload.method.strip() if payload.method is not None else relay["method"],
+            "legacy_port": payload.legacy_port if payload.legacy_port is not None else int(relay["legacy_port"] or 0),
+            "region": payload.region.strip() if payload.region is not None else relay["region"],
+            "weight": payload.weight if payload.weight is not None else int(relay["weight"]),
+            "enabled": int(payload.enabled) if payload.enabled is not None else int(relay["enabled"]),
+            "draining": int(payload.draining) if payload.draining is not None else int(relay["draining"]),
+        }
+        validate_relay_ports(values["port_start"], values["port_end"])
+        token = secrets.token_urlsafe(32) if payload.regenerate_token else None
+        updated_at = iso(now())
+        connection.execute(
+            """UPDATE relays SET name = ?, host = ?, port_start = ?, port_end = ?,
+                      method = ?, legacy_port = ?, region = ?, weight = ?,
+                      enabled = ?, draining = ?, token_hash = COALESCE(?, token_hash),
+                      updated_at = ? WHERE id = ?""",
+            (
+                values["name"], values["host"], values["port_start"], values["port_end"],
+                values["method"], values["legacy_port"], values["region"], values["weight"],
+                values["enabled"], values["draining"], relay_token_hash(token) if token else None,
+                updated_at, relay_id,
+            ),
+        )
+        normalize_relay_ports(connection)
+        updated = relay_row(connection, relay_id)
+        response: dict[str, object] = {"relay": relay_admin_payload(connection, updated)}
+        if token:
+            response["token"] = token
+        return response
+
+
+@app.delete("/v1/admin/relays/{relay_id}")
+def admin_delete_relay(
+    relay_id: str,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> None:
+    if relay_id == DEFAULT_RELAY_ID:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="默认 relay 不能删除，请停用或排空")
+    with db() as connection:
+        relay = relay_row(connection, relay_id)
+        if not relay:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="relay 不存在")
+        lease_count = connection.execute("SELECT COUNT(*) FROM leases WHERE relay_id = ?", (relay_id,)).fetchone()[0]
+        if lease_count:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="relay 仍有关联租约，请先排空并等待租约过期")
+        connection.execute("DELETE FROM relays WHERE id = ?", (relay_id,))
 
 
 @app.get("/v1/admin/feedback")

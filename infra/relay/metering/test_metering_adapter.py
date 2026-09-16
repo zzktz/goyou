@@ -38,6 +38,14 @@ class RelayConfigTests(unittest.TestCase):
         self.assertEqual(ports, [30003, 30004])
         self.assertEqual(duplicates, [])
 
+    def test_api_method_overrides_local_fallback(self) -> None:
+        config = metering_adapter.relay_config(
+            [{"lease_id": "first", "port": 30003, "password": "one"}],
+            "aes-256-gcm",
+        )
+
+        self.assertEqual(config["inbounds"][0]["method"], "aes-256-gcm")
+
 
 if __name__ == "__main__":
     unittest.main()
