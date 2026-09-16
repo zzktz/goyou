@@ -48,6 +48,9 @@ RELAY_PORT_START = int(os.getenv("RELAY_PORT_START", "30000"))
 RELAY_PORT_END = int(os.getenv("RELAY_PORT_END", "39999"))
 RELAY_METHOD = os.getenv("RELAY_METHOD", "chacha20-ietf-poly1305")
 RELAY_PASSWORD = os.getenv("RELAY_PASSWORD", "")
+RELAY_HEARTBEAT_TIMEOUT_SECONDS = max(
+    10, min(int(os.getenv("RELAY_HEARTBEAT_TIMEOUT_SECONDS", "30")), 300)
+)
 DEFAULT_DAILY_QUOTA_BYTES = int(os.getenv("DEFAULT_DAILY_QUOTA_BYTES", "1000000000"))
 DEFAULT_ACCOUNT_VALID_DAYS = int(os.getenv("DEFAULT_ACCOUNT_VALID_DAYS", "365"))
 QUOTA_TIMEZONE = os.getenv("QUOTA_TIMEZONE", "Asia/Shanghai")
@@ -203,6 +206,14 @@ def ensure_user_quota(connection: sqlite3.Connection, user_id: str) -> sqlite3.R
 
 
 def allocate_relay_port(connection: sqlite3.Connection) -> int:
+    # Expired or revoked leases must not reserve a port forever. Clearing the
+    # value also keeps the unique index below compatible with SQLite's lease
+    # lifecycle, where an expired lease can later be refreshed.
+    connection.execute(
+        """UPDATE leases SET relay_port = NULL
+           WHERE relay_port IS NOT NULL AND (revoked_at IS NOT NULL OR expires_at <= ?)""",
+        (iso(now()),),
+    )
     used = {
         int(row[0])
         for row in connection.execute(
@@ -214,6 +225,46 @@ def allocate_relay_port(connection: sqlite3.Connection) -> int:
         if port != RELAY_PORT and port not in used:
             return port
     raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="代理节点当前没有可用端口")
+
+
+def relay_port_is_available(
+    connection: sqlite3.Connection, port: int | None, lease_id: str | None = None
+) -> bool:
+    if port is None or port == RELAY_PORT or not RELAY_PORT_START <= port <= RELAY_PORT_END:
+        return False
+    row = connection.execute(
+        """SELECT 1 FROM leases
+           WHERE relay_port = ? AND revoked_at IS NULL AND expires_at > ?
+             AND (? IS NULL OR id != ?)
+           LIMIT 1""",
+        (port, iso(now()), lease_id, lease_id),
+    ).fetchone()
+    return row is None
+
+
+def normalize_relay_ports(connection: sqlite3.Connection) -> None:
+    """Release stale ports and repair duplicates left by older deployments."""
+    current = iso(now())
+    connection.execute(
+        """UPDATE leases SET relay_port = NULL
+           WHERE relay_port IS NOT NULL
+             AND (revoked_at IS NOT NULL OR expires_at <= ?
+                  OR relay_port = ? OR relay_port < ? OR relay_port > ?)""",
+        (current, RELAY_PORT, RELAY_PORT_START, RELAY_PORT_END),
+    )
+    active = connection.execute(
+        """SELECT id, relay_port FROM leases
+           WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL
+           ORDER BY expires_at ASC, id ASC""",
+        (current,),
+    ).fetchall()
+    seen: set[int] = set()
+    for lease in active:
+        port = int(lease["relay_port"])
+        if port in seen:
+            connection.execute("UPDATE leases SET relay_port = NULL WHERE id = ?", (lease["id"],))
+        else:
+            seen.add(port)
 
 
 def new_relay_credentials(lease_id: str) -> tuple[str, str]:
@@ -378,6 +429,15 @@ def init_db() -> None:
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS relay_health (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_seen_at TEXT NOT NULL,
+                process_running INTEGER NOT NULL DEFAULT 0,
+                listen_ports TEXT NOT NULL DEFAULT '[]',
+                duplicate_ports TEXT NOT NULL DEFAULT '[]',
+                lease_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(usage_date);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_reported_at ON usage_reports(reported_at);
             CREATE INDEX IF NOT EXISTS idx_usage_reports_user_id ON usage_reports(user_id);
@@ -408,6 +468,12 @@ def init_db() -> None:
         lease_columns = {row[1] for row in connection.execute("PRAGMA table_info(leases)").fetchall()}
         if "relay_port" not in lease_columns:
             connection.execute("ALTER TABLE leases ADD COLUMN relay_port INTEGER")
+        normalize_relay_ports(connection)
+        connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_relay_port
+               ON leases(relay_port)
+               WHERE revoked_at IS NULL AND relay_port IS NOT NULL"""
+        )
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
         added_expiry_column = "account_expires_at" not in user_columns
         if added_expiry_column:
@@ -573,6 +639,14 @@ class UsageReportRequest(BaseModel):
     target_port: int | None = Field(default=None, ge=1, le=65535)
     upload_bytes: int = Field(default=0, ge=0, le=10_000_000_000_000)
     download_bytes: int = Field(default=0, ge=0, le=10_000_000_000_000)
+
+
+class RelayHeartbeatRequest(BaseModel):
+    process_running: bool
+    listen_ports: list[int] = Field(default_factory=list, max_length=20_000)
+    duplicate_ports: list[int] = Field(default_factory=list, max_length=20_000)
+    lease_count: int = Field(default=0, ge=0, le=20_000)
+    error: str | None = Field(default=None, max_length=2000)
 
 
 def public_user(row: sqlite3.Row) -> dict[str, str]:
@@ -1281,9 +1355,17 @@ def refresh_lease(payload: LeaseRefreshRequest, user: Annotated[sqlite3.Row, Dep
         username = lease["username"]
         password = lease["password"]
         relay_port = lease["relay_port"]
-        if username == "relay" or password == RELAY_PASSWORD or relay_port is None:
+        if (
+            username == "relay"
+            or password == RELAY_PASSWORD
+            or not relay_port_is_available(connection, relay_port, payload.lease_id)
+        ):
+            relay_port = (
+                relay_port
+                if relay_port_is_available(connection, relay_port, payload.lease_id)
+                else allocate_relay_port(connection)
+            )
             username, password = new_relay_credentials(payload.lease_id)
-            relay_port = allocate_relay_port(connection)
         connection.execute(
             "UPDATE leases SET expires_at = ?, username = ?, password = ?, relay_port = ? WHERE id = ?",
             (iso(expires), username, password, relay_port, payload.lease_id),
@@ -1363,6 +1445,38 @@ def report_usage(
                 (payload.user_id, date, upload, download, total, iso(now()), exceeded_at),
             )
         return usage_payload(connection, payload.user_id)
+
+
+@app.post("/v1/internal/relay/heartbeat")
+def relay_heartbeat(
+    payload: RelayHeartbeatRequest,
+    _agent: Annotated[None, Depends(current_metering_agent)],
+) -> dict[str, object]:
+    listen_ports = sorted({port for port in payload.listen_ports if 1 <= port <= 65535})
+    duplicate_ports = sorted({port for port in payload.duplicate_ports if 1 <= port <= 65535})
+    with db() as connection:
+        connection.execute(
+            """INSERT INTO relay_health(
+                   id, last_seen_at, process_running, listen_ports,
+                   duplicate_ports, lease_count, error
+               ) VALUES (1, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   last_seen_at = excluded.last_seen_at,
+                   process_running = excluded.process_running,
+                   listen_ports = excluded.listen_ports,
+                   duplicate_ports = excluded.duplicate_ports,
+                   lease_count = excluded.lease_count,
+                   error = excluded.error""",
+            (
+                iso(now()),
+                int(payload.process_running),
+                json.dumps(listen_ports),
+                json.dumps(duplicate_ports),
+                payload.lease_count,
+                payload.error,
+            ),
+        )
+    return {"ok": True}
 
 
 @app.get("/v1/internal/relay/leases")
@@ -1844,12 +1958,69 @@ def lease_state(row: sqlite3.Row) -> str:
     return "active"
 
 
+def relay_health_payload(
+    connection: sqlite3.Connection, active_ports: set[int]
+) -> dict[str, object]:
+    row = connection.execute("SELECT * FROM relay_health WHERE id = 1").fetchone()
+    heartbeat_age: float | None = None
+    listen_ports: list[int] = []
+    duplicate_ports: list[int] = []
+    process_running = False
+    error: str | None = None
+    heartbeat_at: str | None = None
+    if row:
+        heartbeat_at = row["last_seen_at"]
+        try:
+            heartbeat_age = max(0.0, (now() - datetime.fromisoformat(heartbeat_at)).total_seconds())
+        except (TypeError, ValueError):
+            heartbeat_age = None
+        process_running = bool(row["process_running"])
+        try:
+            listen_ports = sorted({int(port) for port in json.loads(row["listen_ports"] or "[]")})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            listen_ports = []
+        try:
+            duplicate_ports = sorted({int(port) for port in json.loads(row["duplicate_ports"] or "[]")})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            duplicate_ports = []
+        error = row["error"]
+    stale = heartbeat_age is None or heartbeat_age > RELAY_HEARTBEAT_TIMEOUT_SECONDS
+    missing_ports = sorted(active_ports - set(listen_ports))
+    status_value = (
+        "error"
+        if stale or not process_running
+        else "warning"
+        if duplicate_ports or missing_ports or error
+        else "ok"
+    )
+    return {
+        "status": status_value,
+        "process_running": process_running,
+        "heartbeat_at": heartbeat_at,
+        "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+        "heartbeat_stale": stale,
+        "listen_ports": listen_ports,
+        "active_lease_ports": sorted(active_ports),
+        "missing_ports": missing_ports,
+        "duplicate_ports": duplicate_ports,
+        "error": error,
+    }
+
+
 @app.get("/v1/admin/overview")
 def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
     with db() as connection:
         users = connection.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN disabled = 0 THEN 1 ELSE 0 END) AS enabled FROM users").fetchone()
         leases = connection.execute("SELECT id, expires_at, revoked_at FROM leases").fetchall()
+        active_port_rows = connection.execute(
+            """SELECT relay_port FROM leases
+               WHERE revoked_at IS NULL AND expires_at > ? AND relay_port IS NOT NULL""",
+            (iso(now()),),
+        ).fetchall()
         refresh_tokens = connection.execute("SELECT COUNT(*) AS total FROM refresh_tokens WHERE revoked_at IS NULL AND expires_at > ?", (iso(now()),)).fetchone()["total"]
+        relay_status = relay_health_payload(
+            connection, {int(row["relay_port"]) for row in active_port_rows}
+        )
     states = {"active": 0, "expired": 0, "revoked": 0, "unknown": 0}
     for lease in leases:
         states[lease_state(lease)] += 1
@@ -1863,6 +2034,7 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
             "relay_port_end": RELAY_PORT_END,
             "relay_method": RELAY_METHOD,
         },
+        "relay": relay_status,
         "users": {"total": users["total"], "enabled": users["enabled"] or 0, "disabled": (users["total"] or 0) - (users["enabled"] or 0)},
         "leases": {"total": len(leases), **states},
         "active_refresh_tokens": refresh_tokens,

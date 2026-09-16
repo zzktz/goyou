@@ -77,6 +77,7 @@ def save_state(state: dict[str, dict[str, int]]) -> None:
 
 def relay_config(leases: list[dict]) -> dict:
     inbounds = []
+    seen_ports: set[int] = set()
     if LEGACY_RELAY_PASSWORD:
         inbounds.append(
             {
@@ -88,13 +89,22 @@ def relay_config(leases: list[dict]) -> dict:
                 "password": LEGACY_RELAY_PASSWORD,
             }
         )
+        seen_ports.add(LEGACY_RELAY_PORT)
     for lease in leases:
+        port = int(lease["port"])
+        if port in seen_ports:
+            # A stale API/database state must not take the entire relay down.
+            # The API repairs this condition on startup/refresh; skipping the
+            # later duplicate keeps already-valid leases available meanwhile.
+            print(f"duplicate relay port {port} for lease {lease['lease_id']}; skipping", flush=True)
+            continue
+        seen_ports.add(port)
         inbounds.append(
             {
                 "type": "shadowsocks",
                 "tag": f"lease-{lease['lease_id']}",
                 "listen": "0.0.0.0",
-                "listen_port": int(lease["port"]),
+                "listen_port": port,
                 "method": RELAY_METHOD,
                 "password": lease["password"],
             }
@@ -218,6 +228,23 @@ def split_host_port(value: object) -> tuple[str | None, int | None]:
     return value, None
 
 
+def relay_port_snapshot(leases: list[dict]) -> tuple[list[int], list[int]]:
+    ports: list[int] = [LEGACY_RELAY_PORT] if LEGACY_RELAY_PASSWORD else []
+    duplicates: list[int] = []
+    seen = set(ports)
+    for lease in leases:
+        try:
+            port = int(lease["port"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if port in seen:
+            duplicates.append(port)
+        else:
+            seen.add(port)
+            ports.append(port)
+    return sorted(set(ports)), sorted(set(duplicates))
+
+
 def connection_target(connection: dict) -> tuple[str | None, int | None]:
     metadata = connection.get("metadata") or {}
     sources = [metadata, connection]
@@ -254,6 +281,29 @@ def connection_target(connection: dict) -> tuple[str | None, int | None]:
                     port = parsed
                     break
     return host, port
+
+
+def report_heartbeat(
+    process_running: bool,
+    listen_ports: list[int],
+    duplicate_ports: list[int],
+    lease_count: int,
+    error: str | None = None,
+) -> None:
+    try:
+        request_json(
+            "/v1/internal/relay/heartbeat",
+            "POST",
+            {
+                "process_running": process_running,
+                "listen_ports": listen_ports,
+                "duplicate_ports": duplicate_ports,
+                "lease_count": lease_count,
+                "error": error,
+            },
+        )
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as heartbeat_error:
+        print(f"relay heartbeat failed: {heartbeat_error}", flush=True)
 
 
 def poll_connections(state: dict[str, dict[str, int]]) -> None:
@@ -310,6 +360,9 @@ def main() -> None:
     state = load_state()
     try:
         while not stop_requested:
+            leases: list[dict] = []
+            generated: dict = {}
+            sync_error: str | None = None
             try:
                 payload = request_json("/v1/internal/relay/leases")
                 leases = payload.get("leases", [])
@@ -322,7 +375,16 @@ def main() -> None:
                     child = start_child()
                     previous_fingerprint = fingerprint
             except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as error:
+                sync_error = str(error)
                 print(f"relay sync failed: {error}", flush=True)
+            listen_ports, duplicate_ports = relay_port_snapshot(leases)
+            report_heartbeat(
+                child is not None and child.poll() is None,
+                listen_ports,
+                duplicate_ports,
+                len(leases),
+                sync_error,
+            )
             poll_connections(state)
             save_state(state)
             time.sleep(SYNC_INTERVAL)

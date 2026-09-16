@@ -46,6 +46,7 @@ curl http://127.0.0.1:18080/healthz
 - `GET /v1/admin/users/{user_id}/usage`
 - `GET /v1/admin/usage`
 - `POST /v1/internal/usage/report` (trusted relay metering adapter)
+- `POST /v1/internal/relay/heartbeat` (trusted relay process and port health)
 - `GET /v1/admin/traffic-logs` (管理员查看连接级流量、设备号、目标域名和端口)
 - `GET /v1/admin/feedback`
 - `POST /v1/admin/feedback/{feedback_id}/reply`
@@ -71,6 +72,8 @@ curl http://127.0.0.1:18080/healthz
 客户端生产 API 地址记录在本机 `docs/敏感信息.md`。构建客户端时可通过 `VITE_API_BASE_URL` 覆盖默认地址。
 
 新租约会分配独立 Shadowsocks 凭据和 relay 端口（默认 `30000-39999`），计量适配器通过内部同步接口读取这些租约并生成 relay 配置。旧租约会在下一次刷新时迁移到独立凭据。
+
+relay 计量适配器会定期调用心跳接口；`RELAY_HEARTBEAT_TIMEOUT_SECONDS`（默认 `30` 秒）用于判断后台总览中的心跳是否超时。
 
 每日流量额度默认由 `DEFAULT_DAILY_QUOTA_BYTES` 设置（默认 1000 MB），统计时区由 `QUOTA_TIMEZONE` 设置（默认 `Asia/Shanghai`）。`METERING_TOKEN` 只用于可信 relay 计量组件向内部接口上报上传和下载字节数；当前共享 relay 凭据尚不能区分用户，正式启用服务端限额前必须完成独立用户凭据和 relay 计量接入。
 

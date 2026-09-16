@@ -2,6 +2,7 @@ use crate::auto_launch;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -72,6 +73,10 @@ pub struct Status {
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub proxy_running: bool,
+    pub local_proxy_reachable: bool,
+    pub upstream_reachable: Option<bool>,
+    pub failure_kind: Option<String>,
+    pub upstream_error: Option<String>,
     pub github_reachable: bool,
     pub latency_ms: u64,
     pub github_status: Option<u16>,
@@ -552,6 +557,109 @@ fn resolve_relay_host(host: &str, port: u16) -> Result<String, String> {
         .next()
         .ok_or_else(|| format!("代理节点地址 {host} 没有可用的 IPv4 地址"))
 }
+
+fn ensure_relay_endpoint(host: &str, port: u16) -> Result<(), String> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("无法连接代理节点 {host}:{port}：{error}"))?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    Err(format!(
+        "代理节点 {host}:{port} 当前不可用{}，未启用系统代理。",
+        last_error
+            .map(|error| format!("：{error}"))
+            .unwrap_or_default()
+    ))
+}
+
+fn validate_local_socks() -> Result<(), String> {
+    let mut stream = TcpStream::connect_timeout(
+        &format!("{HOST}:{PORT}")
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("本地代理地址无效：{error}"))?,
+        Duration::from_secs(2),
+    )
+    .map_err(|error| format!("本地代理未能接受连接：{error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(8))))
+        .map_err(|error| format!("无法设置代理连接超时：{error}"))?;
+
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .and_then(|_| {
+            let mut response = [0; 2];
+            stream.read_exact(&mut response)?;
+            if response != [0x05, 0x00] {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "SOCKS5 握手被拒绝",
+                ));
+            }
+            Ok(())
+        })
+        .map_err(|error| format!("本地代理握手失败：{error}"))?;
+
+    let target = b"www.gstatic.com";
+    let mut request = Vec::with_capacity(7 + target.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, target.len() as u8]);
+    request.extend_from_slice(target);
+    request.extend_from_slice(&443u16.to_be_bytes());
+    stream
+        .write_all(&request)
+        .map_err(|error| format!("代理节点连接失败：{error}"))?;
+
+    let mut response = [0; 4];
+    stream
+        .read_exact(&mut response)
+        .map_err(|error| format!("代理节点未返回连接结果：{error}"))?;
+    if response[0] != 0x05 || response[1] != 0x00 {
+        return Err(format!(
+            "代理节点连接失败（SOCKS5 错误码 {}）。",
+            response[1]
+        ));
+    }
+    let address_length = match response[3] {
+        0x01 => 4,
+        0x03 => {
+            let mut length = [0; 1];
+            stream
+                .read_exact(&mut length)
+                .map_err(|error| format!("读取代理节点地址失败：{error}"))?;
+            usize::from(length[0])
+        }
+        0x04 => 16,
+        _ => return Err("代理节点返回了无效的 SOCKS5 地址类型。".into()),
+    };
+    let mut address = vec![0; address_length + 2];
+    stream
+        .read_exact(&mut address)
+        .map_err(|error| format!("读取代理节点连接地址失败：{error}"))?;
+    Ok(())
+}
+
+fn configured_relay_endpoint() -> Option<(String, u16)> {
+    let value =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(singbox_config_file()).ok()?)
+            .ok()?;
+    value
+        .get("outbounds")?
+        .as_array()?
+        .iter()
+        .find(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str) == Some("relay"))
+        .and_then(|outbound| {
+            Some((
+                outbound.get("server")?.as_str()?.to_owned(),
+                u16::try_from(outbound.get("server_port")?.as_u64()?).ok()?,
+            ))
+        })
+}
+
 fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     if lease.host.trim().is_empty()
         || lease.method.trim().is_empty()
@@ -562,12 +670,13 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     if status().tunnel_running {
         return Ok(());
     }
-    ensure_port_available()?;
-    let config_path = singbox_config_file();
     // Resolve the relay endpoint before enabling DNS-over-relay. Otherwise a
     // hostname relay could create a dependency cycle: remote DNS uses the
     // relay, while the relay itself still needs to be resolved.
     let relay_host = resolve_relay_host(&lease.host, lease.port)?;
+    ensure_relay_endpoint(&relay_host, lease.port)?;
+    ensure_port_available()?;
+    let config_path = singbox_config_file();
     fs::create_dir_all(config_path.parent().ok_or("invalid sing-box config path")?)
         .map_err(|e| format!("无法创建 sing-box 配置目录: {e}"))?;
     let config = serde_json::json!({
@@ -663,6 +772,11 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     })?;
     for _ in 0..30 {
         if port_open() {
+            if let Err(error) = validate_local_socks() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{error}，未启用系统代理。"));
+            }
             let mut p = read();
             p.singbox_pid = Some(child.id());
             save(&p)?;
@@ -1116,6 +1230,10 @@ pub async fn diagnose_goyou() -> Diagnostic {
     if !s.tunnel_running {
         return Diagnostic {
             proxy_running: false,
+            local_proxy_reachable: false,
+            upstream_reachable: None,
+            failure_kind: Some("local_proxy".into()),
+            upstream_error: None,
             github_reachable: false,
             latency_ms: 0,
             github_status: None,
@@ -1130,6 +1248,17 @@ pub async fn diagnose_goyou() -> Diagnostic {
             error: Some("本地代理进程未运行。".into()),
         };
     }
+    let local_proxy_reachable = port_open();
+    let (upstream_reachable, upstream_error) = match configured_relay_endpoint() {
+        Some((host, port)) => match ensure_relay_endpoint(&host, port) {
+            Ok(()) => (Some(true), None),
+            Err(error) => (Some(false), Some(error)),
+        },
+        None if s.proxy_mode.as_deref() == Some("sing-box") => {
+            (Some(false), Some("未找到 sing-box 上游节点配置。".into()))
+        }
+        None => (None, None),
+    };
     let client = reqwest::Client::builder()
         // `socks5h` delegates hostname resolution to sing-box. Using plain
         // `socks5` would resolve the test domain with the local DNS first and
@@ -1193,13 +1322,45 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let google_status = google_outcome.as_ref().ok().copied();
     let github_reachable = github_status.is_some();
     let google_reachable = google_status.is_some();
+    let proxy_auth_failed = [&github_outcome, &google_outcome]
+        .into_iter()
+        .filter_map(|outcome| outcome.as_ref().err())
+        .map(|error| error.to_ascii_lowercase())
+        .any(|error| {
+            error.contains("authentication")
+                || error.contains("auth method")
+                || error.contains("proxy auth")
+                || error.contains("socks5 auth")
+                || error.contains("407")
+        });
+    let failure_kind = if !local_proxy_reachable {
+        Some("local_proxy".to_string())
+    } else if upstream_reachable == Some(false) {
+        Some("upstream".to_string())
+    } else if proxy_auth_failed {
+        Some("auth".to_string())
+    } else if !github_reachable || !google_reachable {
+        Some("target".to_string())
+    } else {
+        None
+    };
     let analysis = match (github_reachable, google_reachable) {
         (true, true) => "GitHub 和 Google 均可达。".to_string(),
         (true, false) => "GitHub 可达但 Google 不可达，可能是当前网络或代理节点对 Google 域名、DNS、区域线路有限制。".to_string(),
         (false, true) => "Google 可达但 GitHub 不可达，可能是 GitHub 域名或代理节点线路受限。".to_string(),
         (false, false) => "GitHub 和 Google 均不可达，优先检查本地代理进程、代理上游节点和 DNS 解析。".to_string(),
     };
+    let analysis = match failure_kind.as_deref() {
+        Some("local_proxy") => "本地代理端口不可用，系统代理指向了一个未监听的本地服务。".into(),
+        Some("upstream") => "本地代理端口可用，但上游代理节点不可达，无法继续转发请求。".into(),
+        Some("auth") => "本地代理和上游节点可达，但代理认证失败，请刷新租约凭据。".into(),
+        Some("target") => "本地代理和上游节点可用，但目标站点或 DNS 解析不可达。".into(),
+        _ => analysis,
+    };
     let errors = [
+        upstream_error
+            .clone()
+            .map(|error| format!("上游节点：{error}")),
         github_outcome.err().map(|error| format!("GitHub: {error}")),
         google_outcome.err().map(|error| format!("Google: {error}")),
     ]
@@ -1218,6 +1379,10 @@ pub async fn diagnose_goyou() -> Diagnostic {
     let matches = proxies.iter().any(|v| v.contains("127.0.0.1:7890"));
     Diagnostic {
         proxy_running: true,
+        local_proxy_reachable,
+        upstream_reachable,
+        failure_kind,
+        upstream_error,
         github_reachable,
         latency_ms,
         github_status,

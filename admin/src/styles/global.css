@@ -132,6 +132,9 @@ body {
 .service-alert {
   margin-bottom: 20px;
 }
+.relay-health-alert {
+  margin-top: 16px;
+}
 .stat-row {
   margin-bottom: 4px;
 }

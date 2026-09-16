@@ -43,6 +43,10 @@ interface Status {
 
 interface Diagnostic {
   proxyRunning: boolean;
+  localProxyReachable: boolean;
+  upstreamReachable: boolean | null;
+  failureKind: "local_proxy" | "upstream" | "auth" | "target" | null;
+  upstreamError: string | null;
   githubReachable: boolean;
   latencyMs: number;
   githubStatus: number | null;
@@ -614,6 +618,20 @@ function Dashboard({
       const result = diagnosticResult;
       const report = [
         "【自动网络问题收集】",
+        "本地代理端口：" + (result.localProxyReachable ? "可连接" : "不可连接"),
+        "代理上游节点：" +
+          (result.upstreamReachable === null
+            ? "未检测"
+            : result.upstreamReachable
+              ? "可连接"
+              : "不可连接"),
+        "故障类型：" +
+          ({
+            local_proxy: "本地端口未监听",
+            upstream: "上游端口不可达",
+            auth: "代理认证失败",
+            target: "目标站点或 DNS 不可达",
+          }[result.failureKind ?? "target"] ?? "目标站点或 DNS 不可达"),
         `应用版本：v${appPackage.version}`,
         `收集时间：${new Date().toLocaleString("zh-CN", { hour12: false })}`,
         `代理运行状态：${result.proxyRunning ? "运行中" : "未运行"}`,
@@ -967,9 +985,15 @@ function Dashboard({
         : result.gitProxyConfigured
           ? "Git 使用其他代理"
           : "Git 未配置全局代理";
-      const diagnosticError = result.error?.includes("proxy")
-        ? "代理上游节点不可达，请稍后重试"
-        : result.error;
+      const failureReason = result.failureKind
+        ? {
+            local_proxy: "本地代理端口不可用，请重新启动代理",
+            upstream: "代理上游节点不可达，请稍后重试",
+            auth: "代理认证失败，请刷新租约或重新登录",
+            target: "目标站点或 DNS 不可达，请检查目标域名和线路",
+          }[result.failureKind]
+        : null;
+      const diagnosticError = failureReason || result.error;
       setInfoMessage(
         result.githubReachable && result.googleReachable
           ? `${reachability}；${gitProxyStatus}`
