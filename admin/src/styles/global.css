@@ -240,6 +240,23 @@ body {
 .monthly-usage-card {
   margin-bottom: 20px;
 }
+.overview-resource-row {
+  align-items: stretch;
+}
+.overview-resource-row > .ant-col {
+  display: flex;
+}
+.overview-resource-row .panel-card {
+  width: 100%;
+}
+.database-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.database-card .ant-alert {
+  margin-top: auto;
+}
 .monthly-usage-content {
   display: flex;
   align-items: center;

@@ -13,6 +13,15 @@ function formatGigabytes(value) {
   const precision = gigabytes >= 100 || gigabytes === 0 ? 0 : 1
   return `${gigabytes.toFixed(precision)} GB`
 }
+function formatBytes(value) {
+  const bytes = Number(value || 0)
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const amount = bytes / (1024 ** index)
+  const precision = index === 0 ? 0 : amount >= 100 ? 0 : amount >= 10 ? 1 : 2
+  return `${amount.toFixed(precision)} ${units[index]}`
+}
 function monthlyUsageColor(usage) { return usage?.exceeded ? '#cf1322' : usage?.percentage >= 80 ? '#d48806' : '#1677ff' }
 function relayStatusColor(value) { return value === 'ok' ? 'success' : value === 'warning' ? 'warning' : 'error' }
 function relayStatusLabel(value) { return value === 'ok' ? '正常' : value === 'warning' ? '需关注' : '异常' }
@@ -35,21 +44,35 @@ onMounted(load)
       <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-orange" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><ClockCircleOutlined /></div><span>已过期租约</span></div><div class="stat-card-value">{{ data?.leases?.expired || 0 }}</div><div class="stat-note">已结束的历史租约</div></a-card></a-col>
       <a-col :xs="24" :sm="12" :xl="6"><a-card class="stat-card stat-card-red" :loading="loading"><div class="stat-card-top"><div class="stat-card-icon"><StopOutlined /></div><span>已撤销租约</span></div><div class="stat-card-value">{{ data?.leases?.revoked || 0 }}</div><div class="stat-note">管理员主动撤销</div></a-card></a-col>
     </a-row>
-    <a-card v-if="data?.monthly_usage" title="月度流量" class="panel-card monthly-usage-card" :loading="loading">
-      <div class="monthly-usage-content">
-        <a-progress type="circle" :percent="Math.min(data.monthly_usage.percentage, 100)" :stroke-color="monthlyUsageColor(data.monthly_usage)" :width="132" />
-        <div class="monthly-usage-details">
-          <div class="monthly-usage-total"><strong>{{ formatGigabytes(data.monthly_usage.used_bytes) }}</strong><span> / {{ formatGigabytes(data.monthly_usage.quota_bytes) }}</span></div>
-          <div class="monthly-usage-label">已使用 / 月度固定额度</div>
-          <a-descriptions :column="1" size="small">
-            <a-descriptions-item label="统计周期">{{ data.monthly_usage.period_start }} 00:00 至 {{ data.monthly_usage.period_end }} 00:00（每月 10 日切换）</a-descriptions-item>
-            <a-descriptions-item label="剩余流量">{{ formatGigabytes(data.monthly_usage.remaining_bytes) }}</a-descriptions-item>
-            <a-descriptions-item label="上传 / 下载">{{ formatGigabytes(data.monthly_usage.upload_bytes) }} / {{ formatGigabytes(data.monthly_usage.download_bytes) }}</a-descriptions-item>
-          </a-descriptions>
-          <a-alert v-if="data.monthly_usage.exceeded" type="error" show-icon message="本月流量额度已用尽" />
+    <a-row :gutter="20" class="overview-resource-row">
+      <a-col :xs="24" :xl="14"><a-card v-if="data?.monthly_usage" title="月度流量" class="panel-card monthly-usage-card" :loading="loading">
+        <div class="monthly-usage-content">
+          <a-progress type="circle" :percent="Math.min(data.monthly_usage.percentage, 100)" :stroke-color="monthlyUsageColor(data.monthly_usage)" :width="132" />
+          <div class="monthly-usage-details">
+            <div class="monthly-usage-total"><strong>{{ formatGigabytes(data.monthly_usage.used_bytes) }}</strong><span> / {{ formatGigabytes(data.monthly_usage.quota_bytes) }}</span></div>
+            <div class="monthly-usage-label">已使用 / 月度固定额度</div>
+            <a-descriptions :column="1" size="small">
+              <a-descriptions-item label="统计周期">{{ data.monthly_usage.period_start }} 00:00 至 {{ data.monthly_usage.period_end }} 00:00（每月 10 日切换）</a-descriptions-item>
+              <a-descriptions-item label="剩余流量">{{ formatGigabytes(data.monthly_usage.remaining_bytes) }}</a-descriptions-item>
+              <a-descriptions-item label="上传 / 下载">{{ formatGigabytes(data.monthly_usage.upload_bytes) }} / {{ formatGigabytes(data.monthly_usage.download_bytes) }}</a-descriptions-item>
+            </a-descriptions>
+            <a-alert v-if="data.monthly_usage.exceeded" type="error" show-icon message="本月流量额度已用尽" />
+          </div>
         </div>
-      </div>
-    </a-card>
+      </a-card></a-col>
+      <a-col :xs="24" :xl="10"><a-card v-if="data?.database" title="数据库与备份" class="panel-card database-card" :loading="loading">
+        <a-descriptions :column="1" size="small">
+          <a-descriptions-item label="数据库"><a-tag color="blue">{{ data.database.engine }}</a-tag> {{ formatBytes(data.database.size_bytes) }}</a-descriptions-item>
+          <a-descriptions-item label="数据表">{{ data.database.table_count }} 张</a-descriptions-item>
+          <a-descriptions-item label="流量明细">{{ data.database.usage_report_count.toLocaleString() }} 条 · 保留 {{ data.database.retention_days }} 天</a-descriptions-item>
+          <a-descriptions-item label="并发设置"><a-tag color="green">{{ data.database.journal_mode.toUpperCase() }}</a-tag> busy timeout {{ data.database.busy_timeout_ms }} ms</a-descriptions-item>
+          <a-descriptions-item label="最近备份" v-if="data.database.backup">{{ formatDate(data.database.backup.created_at) }} · {{ formatBytes(data.database.backup.size_bytes) }}</a-descriptions-item>
+          <a-descriptions-item label="最近备份" v-else><span class="warning-text">尚未生成</span></a-descriptions-item>
+        </a-descriptions>
+        <a-alert v-if="data.database.backup" type="success" show-icon message="在线备份正常" :description="`${data.database.backup.filename}（保留 ${data.database.backup_retention_days} 天）`" />
+        <a-alert v-else type="warning" show-icon message="等待首次在线备份" />
+      </a-card></a-col>
+    </a-row>
     <a-card v-if="data?.relays?.length" title="Relay 节点" class="panel-card relay-list-card" :loading="loading">
       <a-table :data-source="data.relays" row-key="id" :pagination="false" :scroll="{ x: 900 }" size="small">
         <a-table-column title="节点" key="name"><template #default="{ record }"><strong>{{ record.name }}</strong><br><span class="muted">{{ record.id }}</span></template></a-table-column>

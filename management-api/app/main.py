@@ -9,6 +9,7 @@ import re
 import secrets
 import smtplib
 import sqlite3
+import threading
 import urllib.error
 import urllib.request
 from email.message import EmailMessage
@@ -41,6 +42,11 @@ else:
     # Keep existing deployments on their original database until an explicit
     # DB_PATH is supplied; new installations use the GoYou filename.
     DB_PATH = _legacy_db_path if _legacy_db_path.exists() and not _goyou_db_path.exists() else _goyou_db_path
+DB_BACKUP_DIR = Path(os.getenv("DB_BACKUP_DIR", str(DB_PATH.parent / "backups")))
+USAGE_REPORT_RETENTION_DAYS = max(1, int(os.getenv("USAGE_REPORT_RETENTION_DAYS", "90")))
+DB_BACKUP_INTERVAL_SECONDS = max(3600, int(os.getenv("DB_BACKUP_INTERVAL_SECONDS", str(24 * 3600))))
+DB_BACKUP_RETENTION_DAYS = max(1, int(os.getenv("DB_BACKUP_RETENTION_DAYS", "30")))
+DB_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000")))
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "240"))
 REFRESH_TOKEN_DAYS = int(os.getenv("REFRESH_TOKEN_DAYS", "30"))
 RELAY_HOST = os.getenv("RELAY_HOST", "relay.123371.com")
@@ -82,6 +88,8 @@ VERIFICATION_CODE_MAX_ATTEMPTS = 5
 password_hasher = PasswordHasher()
 bearer = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
+_maintenance_stop = threading.Event()
+_maintenance_thread: threading.Thread | None = None
 
 
 def now() -> datetime:
@@ -196,10 +204,122 @@ def account_is_expired(value: str | None) -> bool:
 
 def db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000)
     connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def _backup_files() -> list[Path]:
+    if not DB_BACKUP_DIR.exists():
+        return []
+    files: list[tuple[float, Path]] = []
+    for path in DB_BACKUP_DIR.glob(f"{DB_PATH.name}.backup-*.sqlite3"):
+        try:
+            files.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    return [path for _, path in sorted(files, reverse=True)]
+
+
+def _prune_old_backups() -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DB_BACKUP_RETENTION_DAYS)
+    for path in _backup_files():
+        try:
+            modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            if modified_at < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("无法清理旧数据库备份: %s", path, exc_info=True)
+
+
+def online_database_backup() -> Path:
+    """Create a consistent backup without copying the live database file."""
+    DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = DB_BACKUP_DIR / f"{DB_PATH.name}.backup-{stamp}.sqlite3"
+    temporary = DB_BACKUP_DIR / f".{destination.name}.tmp"
+    source_connection = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000)
+    backup_connection = sqlite3.connect(temporary)
+    try:
+        source_connection.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}")
+        source_connection.backup(backup_connection, pages=1000, sleep=0.05)
+        backup_connection.commit()
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        backup_connection.close()
+        source_connection.close()
+    temporary.replace(destination)
+    _prune_old_backups()
+    return destination
+
+
+def database_maintenance_once() -> None:
+    cutoff = iso(now() - timedelta(days=USAGE_REPORT_RETENTION_DAYS))
+    with db() as connection:
+        deleted = connection.execute(
+            "DELETE FROM usage_reports WHERE reported_at < ?", (cutoff,)
+        ).rowcount
+        connection.execute("PRAGMA optimize")
+    backup = online_database_backup()
+    logger.info("数据库维护完成：清理 %s 条流量明细，在线备份 %s", max(deleted, 0), backup)
+
+
+def _database_maintenance_loop() -> None:
+    while not _maintenance_stop.is_set():
+        try:
+            database_maintenance_once()
+        except Exception:
+            logger.exception("数据库维护失败")
+        if _maintenance_stop.wait(DB_BACKUP_INTERVAL_SECONDS):
+            break
+
+
+def latest_database_backup() -> dict[str, object] | None:
+    backups = _backup_files()
+    if not backups:
+        return None
+    path = backups[0]
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return {
+        "filename": path.name,
+        "size_bytes": stat.st_size,
+        "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+
+
+def database_stats_payload(connection: sqlite3.Connection) -> dict[str, object]:
+    database_stat = DB_PATH.stat()
+    wal_path = Path(f"{DB_PATH}-wal")
+    wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+    table_count = connection.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchone()[0]
+    usage_report_count = connection.execute("SELECT COUNT(*) FROM usage_reports").fetchone()[0]
+    oldest_report = connection.execute("SELECT MIN(reported_at) FROM usage_reports").fetchone()[0]
+    journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+    return {
+        "engine": "SQLite",
+        "filename": DB_PATH.name,
+        "size_bytes": database_stat.st_size + wal_size,
+        "database_file_bytes": database_stat.st_size,
+        "wal_bytes": wal_size,
+        "table_count": int(table_count),
+        "usage_report_count": int(usage_report_count),
+        "oldest_usage_report_at": oldest_report,
+        "retention_days": USAGE_REPORT_RETENTION_DAYS,
+        "journal_mode": str(journal_mode).lower(),
+        "busy_timeout_ms": int(busy_timeout),
+        "backup_retention_days": DB_BACKUP_RETENTION_DAYS,
+        "backup": latest_database_backup(),
+    }
 
 
 REGISTRATION_SETTING_KEY = "registration_enabled"
@@ -459,6 +579,8 @@ def user_usage(user_id: str, date: str | None = None) -> dict:
 
 def init_db() -> None:
     with db() as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -1094,7 +1216,22 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=Fals
 
 @app.on_event("startup")
 def startup() -> None:
+    global _maintenance_thread
     init_db()
+    _maintenance_stop.clear()
+    _maintenance_thread = threading.Thread(
+        target=_database_maintenance_loop,
+        name="database-maintenance",
+        daemon=True,
+    )
+    _maintenance_thread.start()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    _maintenance_stop.set()
+    if _maintenance_thread and _maintenance_thread.is_alive():
+        _maintenance_thread.join(timeout=5)
 
 
 @app.get("/healthz")
@@ -2401,6 +2538,7 @@ def admin_overview(admin: Annotated[dict[str, str], Depends(current_admin)]) -> 
         "users": {"total": users["total"], "enabled": users["enabled"] or 0, "disabled": (users["total"] or 0) - (users["enabled"] or 0)},
         "leases": {"total": len(leases), **states},
         "monthly_usage": monthly_usage_payload(connection),
+        "database": database_stats_payload(connection),
         "active_refresh_tokens": refresh_tokens,
         "generated_at": iso(now()),
     }
