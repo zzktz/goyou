@@ -13,7 +13,7 @@ curl http://127.0.0.1:18080/healthz
 
 默认 API 端口为 `18080`，数据库持久化在 `./data/proxyswitch.sqlite3`（沿用已有部署数据路径）。
 
-SQLite 数据库默认使用 WAL 模式和 5 秒 busy timeout。`usage_reports` 连接级流量明细默认保留 90 天，后台进程每天执行一次清理并使用 SQLite 在线备份 API 生成一致性备份；`daily_usage` 汇总数据不会被清理。备份默认保存在数据库目录下的 `backups/`，保留 30 天，可通过 `USAGE_REPORT_RETENTION_DAYS`、`DB_BACKUP_DIR`、`DB_BACKUP_INTERVAL_SECONDS`、`DB_BACKUP_RETENTION_DAYS` 和 `DB_BUSY_TIMEOUT_MS` 调整。
+SQLite 数据库默认使用 WAL 模式和 5 秒 busy timeout。`usage_reports` 连接级流量明细默认保留 90 天，后台进程每天执行一次清理并使用 SQLite 在线备份 API 生成一致性备份；`daily_usage` 汇总数据不会被清理。备份默认保存在数据库目录下的 `backups/`，保留 7 天，可通过 `USAGE_REPORT_RETENTION_DAYS`、`DB_BACKUP_DIR`、`DB_BACKUP_INTERVAL_SECONDS`、`DB_BACKUP_RETENTION_DAYS` 和 `DB_BUSY_TIMEOUT_MS` 调整。
 
 ## 当前接口
 
