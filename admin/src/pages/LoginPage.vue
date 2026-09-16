@@ -2,8 +2,9 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { CloudServerOutlined, LockOutlined, MailOutlined } from '@ant-design/icons-vue'
+import { LockOutlined, MailOutlined } from '@ant-design/icons-vue'
 import { useAuthStore } from '@/stores/auth'
+import goyouLogo from '@/assets/goyou-logo.svg'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -28,7 +29,7 @@ async function submit() {
 <template>
   <div class="login-page">
     <div class="login-panel">
-      <div class="login-brand"><div class="logo"><CloudServerOutlined /></div><div><h1>GoYou</h1><p>中转代理管理控制台</p></div></div>
+      <div class="login-brand"><img class="logo" :src="goyouLogo" alt="GoYou" /><div><h1>GoYou</h1><p>中转代理管理控制台</p></div></div>
       <a-card :bordered="false" class="login-card">
         <h2>管理员登录</h2><p class="sub">管理用户、代理租约与中转服务状态</p>
         <form @submit.prevent="submit">

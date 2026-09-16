@@ -16,6 +16,7 @@ import {
   UserOutlined,
 } from "@ant-design/icons-vue";
 import { useAuthStore } from "@/stores/auth";
+import goyouLogo from "@/assets/goyou-logo.svg";
 
 const route = useRoute();
 const router = useRouter();
@@ -62,7 +63,7 @@ function logout() {
       :trigger="null"
     >
       <div class="brand" :class="{ compact: collapsed }">
-        <CloudServerOutlined />
+        <img class="brand-logo" :src="goyouLogo" alt="GoYou" />
         <span>GoYou 管理</span>
       </div>
       <a-menu
