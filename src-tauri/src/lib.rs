@@ -132,7 +132,21 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to build GoYou")
-        .run(|_app, event| {
+        .run(|app, event| {
+            // macOS sends `Reopen` when the user clicks the Dock icon while
+            // the app is still running but its windows are hidden. Restore
+            // the main window so the Dock behaves like the tray icon.
+            #[cfg(target_os = "macos")]
+            if matches!(
+                &event,
+                RunEvent::Reopen {
+                    has_visible_windows: false,
+                    ..
+                }
+            ) {
+                show_main_window(app);
+            }
+
             // Release the local proxy before the process exits. This is
             // especially important on Windows, where a running sing-box.exe
             // prevents the NSIS installer from replacing the bundled binary.
