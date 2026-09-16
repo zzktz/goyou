@@ -660,6 +660,109 @@ fn configured_relay_endpoint() -> Option<(String, u16)> {
         })
 }
 
+fn bundled_rule_set_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法定位 sing-box 规则目录：{error}"))?;
+    let resource_rules = resource_dir.join("sing-box").join("rules");
+    let development_rules = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("sing-box")
+        .join("rules");
+    let rules_dir = if resource_rules.is_dir() {
+        resource_rules
+    } else {
+        development_rules
+    };
+    let geosite_cn = rules_dir.join("geosite-cn.srs");
+    let geoip_cn = rules_dir.join("geoip-cn.srs");
+    if !geosite_cn.is_file() || !geoip_cn.is_file() {
+        return Err(format!(
+            "客户端缺少国内分流规则，请重新安装或更新客户端：{}",
+            rules_dir.display()
+        ));
+    }
+    Ok((geosite_cn, geoip_cn))
+}
+
+fn singbox_config(
+    relay_host: &str,
+    lease: &ProxyLease,
+    geosite_cn: &Path,
+    geoip_cn: &Path,
+) -> serde_json::Value {
+    serde_json::json!({
+        "log": { "level": "warn" },
+        // Chinese domains use direct DNS. Other domains use encrypted DNS
+        // through the relay so local DNS pollution does not break overseas
+        // sites before the route rules are evaluated.
+        "dns": {
+            "servers": [
+                {
+                    "tag": "local",
+                    "address": "223.5.5.5",
+                    "detour": "direct"
+                },
+                {
+                    "tag": "remote",
+                    "address": "tls://1dot1dot1dot1.cloudflare-dns.com",
+                    "address_resolver": "local",
+                    "detour": "relay"
+                }
+            ],
+            "rules": [
+                { "rule_set": ["geosite-cn"], "server": "local" },
+                { "domain_suffix": ["localhost", "local"], "server": "local" }
+            ],
+            "final": "remote",
+            "strategy": "prefer_ipv4"
+        },
+        "inbounds": [{
+            "type": "mixed",
+            "tag": "local-proxy",
+            "listen": HOST,
+            "listen_port": PORT
+        }],
+        "outbounds": [
+            {
+                "type": "direct",
+                "tag": "direct"
+            },
+            {
+                "type": "shadowsocks",
+                "tag": "relay",
+                "server": relay_host,
+                "server_port": lease.port,
+                "method": lease.method,
+                "password": lease.password
+            }
+        ],
+        "route": {
+            "rule_set": [
+                {
+                    "type": "local",
+                    "tag": "geosite-cn",
+                    "format": "binary",
+                    "path": geosite_cn
+                },
+                {
+                    "type": "local",
+                    "tag": "geoip-cn",
+                    "format": "binary",
+                    "path": geoip_cn
+                }
+            ],
+            "rules": [
+                { "ip_is_private": true, "outbound": "direct" },
+                { "rule_set": ["geosite-cn", "geoip-cn"], "outbound": "direct" },
+                { "domain_suffix": ["localhost", "local"], "outbound": "direct" }
+            ],
+            "final": "relay"
+        }
+    })
+}
+
 fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     if lease.host.trim().is_empty()
         || lease.method.trim().is_empty()
@@ -679,49 +782,8 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     let config_path = singbox_config_file();
     fs::create_dir_all(config_path.parent().ok_or("invalid sing-box config path")?)
         .map_err(|e| format!("无法创建 sing-box 配置目录: {e}"))?;
-    let config = serde_json::json!({
-        "log": { "level": "warn" },
-        // Resolve destination domains through encrypted DNS over the relay.
-        // This keeps proxy access working when the local network DNS cannot
-        // resolve a site (for example, stitch.withgoogle.com).
-        "dns": {
-            "servers": [
-                {
-                    "tag": "bootstrap",
-                    "address": "223.5.5.5"
-                },
-                {
-                    "tag": "cloudflare",
-                    "address": "tls://1dot1dot1dot1.cloudflare-dns.com",
-                    "address_resolver": "bootstrap",
-                    "detour": "relay"
-                },
-                {
-                    "tag": "google",
-                    "address": "tls://dns.google",
-                    "address_resolver": "bootstrap",
-                    "detour": "relay"
-                }
-            ],
-            "final": "cloudflare",
-            "strategy": "prefer_ipv4"
-        },
-        "inbounds": [{
-            "type": "mixed",
-            "tag": "local-proxy",
-            "listen": HOST,
-            "listen_port": PORT
-        }],
-        "outbounds": [{
-            "type": "shadowsocks",
-            "tag": "relay",
-            "server": relay_host,
-            "server_port": lease.port,
-            "method": lease.method,
-            "password": lease.password
-        }],
-        "route": { "final": "relay" }
-    });
+    let (geosite_cn, geoip_cn) = bundled_rule_set_paths(&app)?;
+    let config = singbox_config(&relay_host, lease, &geosite_cn, &geoip_cn);
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?,
@@ -1478,4 +1540,67 @@ pub async fn control_request(
         return Err(detail);
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{singbox_config, ProxyLease};
+    use std::path::Path;
+
+    fn config() -> serde_json::Value {
+        let lease = ProxyLease {
+            host: "relay.example.com".into(),
+            port: 443,
+            method: "aes-256-gcm".into(),
+            password: "test-password".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+        };
+        singbox_config(
+            "203.0.113.10",
+            &lease,
+            Path::new("/app/rules/geosite-cn.srs"),
+            Path::new("/app/rules/geoip-cn.srs"),
+        )
+    }
+
+    #[test]
+    fn config_contains_direct_and_relay_outbounds() {
+        let value = config();
+        let outbounds = value["outbounds"].as_array().expect("outbounds array");
+        assert!(outbounds.iter().any(|item| item["tag"] == "direct"));
+        assert!(outbounds.iter().any(|item| item["tag"] == "relay"));
+        assert_eq!(value["route"]["final"], "relay");
+    }
+
+    #[test]
+    fn config_routes_china_rule_sets_directly() {
+        let value = config();
+        let rule_sets = value["route"]["rule_set"]
+            .as_array()
+            .expect("route rule_set array");
+        assert_eq!(rule_sets[0]["tag"], "geosite-cn");
+        assert_eq!(rule_sets[0]["format"], "binary");
+        assert_eq!(rule_sets[1]["tag"], "geoip-cn");
+        assert_eq!(rule_sets[1]["format"], "binary");
+
+        let route_rules = value["route"]["rules"]
+            .as_array()
+            .expect("route rules array");
+        assert_eq!(route_rules[0]["ip_is_private"], true);
+        assert_eq!(route_rules[0]["outbound"], "direct");
+        assert_eq!(route_rules[1]["rule_set"][0], "geosite-cn");
+        assert_eq!(route_rules[1]["rule_set"][1], "geoip-cn");
+        assert_eq!(route_rules[1]["outbound"], "direct");
+    }
+
+    #[test]
+    fn config_splits_chinese_and_remote_dns() {
+        let value = config();
+        assert_eq!(value["dns"]["final"], "remote");
+        let dns_rules = value["dns"]["rules"].as_array().expect("dns rules array");
+        assert_eq!(dns_rules[0]["rule_set"][0], "geosite-cn");
+        assert_eq!(dns_rules[0]["server"], "local");
+        assert_eq!(value["dns"]["servers"][0]["detour"], "direct");
+        assert_eq!(value["dns"]["servers"][1]["detour"], "relay");
+    }
 }
