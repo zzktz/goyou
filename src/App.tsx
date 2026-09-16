@@ -25,6 +25,7 @@ import {
   refreshSession,
   resetPassword,
   saveRememberedLogin,
+  formatErrorMessage,
   updateProfile,
 } from "./auth";
 import type { AuthSession, FeedbackItem, UsageSummary } from "./auth";
@@ -175,11 +176,7 @@ function AuthPage({
       }
       setCodeCountdown(60);
     } catch (submissionError) {
-      setError(
-        submissionError instanceof Error
-          ? submissionError.message
-          : String(submissionError),
-      );
+      setError(formatErrorMessage(submissionError));
     } finally {
       setCodeBusy(false);
     }
@@ -223,11 +220,7 @@ function AuthPage({
         setCodeCountdown(0);
         setSuccess("密码已重置，请使用新密码登录");
       } catch (submissionError) {
-        setError(
-          submissionError instanceof Error
-            ? submissionError.message
-            : String(submissionError),
-        );
+        setError(formatErrorMessage(submissionError));
       } finally {
         setBusy(false);
       }
@@ -251,11 +244,7 @@ function AuthPage({
       }
       onAuthenticated(session);
     } catch (submissionError) {
-      setError(
-        submissionError instanceof Error
-          ? submissionError.message
-          : String(submissionError),
-      );
+      setError(formatErrorMessage(submissionError));
     } finally {
       setBusy(false);
     }
@@ -497,7 +486,7 @@ function Dashboard({
 
   const setInfoMessage = useCallback(
     (nextMessage: string, tone: MessageTone = "normal") => {
-      setMessage(nextMessage);
+      setMessage(formatErrorMessage(nextMessage));
       setMessageTone(tone);
     },
     [],
@@ -507,7 +496,7 @@ function Dashboard({
     try {
       setFeedbackItems(await getFeedback(currentSession.current));
     } catch (error) {
-      setFeedbackError(error instanceof Error ? error.message : String(error));
+      setFeedbackError(formatErrorMessage(error));
     }
   }, []);
 
@@ -540,7 +529,7 @@ function Dashboard({
       setShowProfile(false);
       setInfoMessage("个人信息已保存。");
     } catch (error) {
-      setProfileError(error instanceof Error ? error.message : String(error));
+      setProfileError(formatErrorMessage(error));
     } finally {
       setProfileBusy(false);
     }
@@ -600,7 +589,7 @@ function Dashboard({
       await loadFeedback();
       setInfoMessage("问题反馈已提交，我们会尽快回复。");
     } catch (error) {
-      setFeedbackError(error instanceof Error ? error.message : String(error));
+      setFeedbackError(formatErrorMessage(error));
     } finally {
       setFeedbackBusy(false);
     }
@@ -648,7 +637,10 @@ function Dashboard({
       closeDiagnosticConsent();
       setInfoMessage("问题检测结果已上传，感谢你的协助。");
     } catch (error) {
-      setInfoMessage(`问题检测结果上传失败：${String(error)}`, "warning");
+      setInfoMessage(
+        `问题检测结果上传失败：${formatErrorMessage(error)}`,
+        "warning",
+      );
     } finally {
       setDiagnosticSubmitting(false);
     }
@@ -904,7 +896,7 @@ function Dashboard({
       } else if (isAuthFailure(error)) {
         await handleAuthFailure();
       } else {
-        setInfoMessage(String(error), "warning");
+        setInfoMessage(formatErrorMessage(error), "warning");
       }
     } finally {
       setBusy(false);
@@ -926,7 +918,7 @@ function Dashboard({
       await refresh();
       setInfoMessage("代理已关闭");
     } catch (error) {
-      setInfoMessage(String(error), "warning");
+      setInfoMessage(formatErrorMessage(error), "warning");
     } finally {
       setBusy(false);
       setBusyAction(null);
@@ -966,7 +958,7 @@ function Dashboard({
       )
       .catch((error) =>
         setInfoMessage(
-          `今日流量额度已用尽，但自动关闭失败：${String(error)}`,
+          `今日流量额度已用尽，但自动关闭失败：${formatErrorMessage(error)}`,
           "warning",
         ),
       );
@@ -1011,7 +1003,7 @@ function Dashboard({
         setDiagnosticConsentOpen(false);
       }
     } catch (error) {
-      setInfoMessage(String(error), "warning");
+      setInfoMessage(formatErrorMessage(error), "warning");
     } finally {
       setBusy(false);
       setBusyAction(null);
@@ -1023,7 +1015,7 @@ function Dashboard({
       await invoke(command, { enabled });
       await refresh();
     } catch (error) {
-      setInfoMessage(String(error), "warning");
+      setInfoMessage(formatErrorMessage(error), "warning");
     } finally {
       setBusy(false);
     }
@@ -1062,7 +1054,7 @@ function Dashboard({
       setUpdateState("available");
     } catch (error) {
       setUpdateState("error");
-      setUpdateError(error instanceof Error ? error.message : String(error));
+      setUpdateError(formatErrorMessage(error));
     } finally {
       updateCheckInFlight.current = false;
     }
@@ -1139,7 +1131,7 @@ function Dashboard({
     } catch (error) {
       setBusy(false);
       setUpdateState("error");
-      setUpdateError(error instanceof Error ? error.message : String(error));
+      setUpdateError(formatErrorMessage(error));
     }
   };
   const formatBytes = (bytes: number) => {
@@ -1160,7 +1152,7 @@ function Dashboard({
       await invoke("disable_goyou");
     } catch (error) {
       setInfoMessage(
-        `关闭代理返回提示，仍将退出登录：${String(error)}`,
+        `关闭代理返回提示，仍将退出登录：${formatErrorMessage(error)}`,
         "warning",
       );
     } finally {
@@ -1170,8 +1162,9 @@ function Dashboard({
     }
   };
   const on = status?.state === "on";
-  const displayedMessage =
-    message === "尚未检测网络连通性" ? (status?.lastError ?? message) : message;
+  const displayedMessage = formatErrorMessage(
+    message === "尚未检测网络连通性" ? (status?.lastError ?? message) : message,
+  );
   const proxyStatusTone = !status
     ? "pending"
     : status.state === "error" || status.lastError

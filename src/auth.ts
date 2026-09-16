@@ -87,11 +87,26 @@ export const API_BASE_URL = (
 
 export function formatErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (!message.includes("管理服务器返回错误")) return message;
-  const quotedMessage = message.match(
-    /管理服务器返回错误(?:\s*[（(]\d+[）)])?\s*[：:]\s*[“"]([\s\S]*?)[”"]/u,
-  )?.[1];
-  return quotedMessage?.trim() || message;
+  const extractedMessage = message.includes("管理服务器返回错误")
+    ? message
+        .match(
+          /管理服务器返回错误(?:\s*[（(]\d+[）)])?\s*[：:]\s*[“"]([\s\S]*?)[”"]/u,
+        )?.[1]
+        ?.trim() || message
+    : message;
+
+  return extractedMessage
+    .replace(
+      /error\s+sending\s+request\s+for\s+url\s*\([^)]*\)/giu,
+      "网络请求失败",
+    )
+    .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/giu, "请求地址")
+    .replace(
+      /\b(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+[a-z]{2,63}(?::\d+)?(?:[/?#][^\s"'<>)]*)?/giu,
+      "请求地址",
+    )
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
