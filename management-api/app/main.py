@@ -2787,6 +2787,38 @@ def admin_reply_feedback(
     return _feedback_payload(row, attachments, include_user=True)
 
 
+@app.delete("/v1/admin/feedback/{feedback_id}")
+def admin_delete_feedback(
+    feedback_id: str,
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+) -> None:
+    """Delete a feedback entry and its uploaded screenshots."""
+    storage_root = FEEDBACK_STORAGE_DIR.resolve()
+    with db() as connection:
+        attachments = connection.execute(
+            "SELECT storage_path FROM feedback_attachments WHERE feedback_id = ?",
+            (feedback_id,),
+        ).fetchall()
+        cursor = connection.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="反馈不存在")
+
+    # Database deletion is authoritative; stale files should not block it. Only
+    # remove paths inside the configured feedback storage directory.
+    for attachment in attachments:
+        path = Path(attachment["storage_path"]).resolve()
+        if storage_root in path.parents:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("无法删除反馈截图: %s", path, exc_info=True)
+    feedback_dir = storage_root / feedback_id
+    try:
+        feedback_dir.rmdir()
+    except OSError:
+        pass
+
+
 @app.get("/v1/admin/feedback/{feedback_id}/attachments/{attachment_id}")
 def admin_feedback_attachment(
     feedback_id: str,

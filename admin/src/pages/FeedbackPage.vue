@@ -1,11 +1,11 @@
 <script setup>
 import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { message } from "ant-design-vue";
+import { message, Modal } from "ant-design-vue";
 import client from "@/api/client";
 
 const rows = ref([]);
 const loading = ref(true);
-const filters = reactive({ status: undefined, keyword: "" });
+const filters = reactive({ status: "open", keyword: "" });
 const pagination = reactive({
   current: 1,
   pageSize: 20,
@@ -25,7 +25,7 @@ function formatDate(value) {
     : "-";
 }
 function statusLabel(value) {
-  return value === "replied" ? "已回复" : "待回复";
+  return value === "replied" ? "已处理" : "待处理";
 }
 function statusColor(value) {
   return value === "replied" ? "green" : "orange";
@@ -60,8 +60,12 @@ async function load(page = pagination.current, pageSize = pagination.pageSize) {
 function search() {
   load(1);
 }
+function changeStatus(status) {
+  filters.status = status;
+  load(1);
+}
 function reset() {
-  filters.status = undefined;
+  filters.status = "open";
   filters.keyword = "";
   load(1);
 }
@@ -111,6 +115,30 @@ async function submitReply() {
     replying.value = false;
   }
 }
+function removeFeedback(record) {
+  Modal.confirm({
+    title: "删除这条反馈？",
+    content: "删除后将同时移除反馈内容和截图，且无法恢复。",
+    okText: "删除",
+    okType: "danger",
+    cancelText: "取消",
+    async onOk() {
+      try {
+        await client.delete(`/v1/admin/feedback/${record.id}`);
+        if (detail.value?.id === record.id) closeDetail();
+        message.success("反馈已删除");
+        const page = rows.value.length === 1 && pagination.current > 1
+          ? pagination.current - 1
+          : pagination.current;
+        await load(page);
+      } catch (error) {
+        if (!error.goyouAdminAuthExpired)
+          message.error(error.response?.data?.detail || "反馈删除失败");
+        throw error;
+      }
+    },
+  });
+}
 function closeDetail() {
   detail.value = null;
   clearPreviews();
@@ -128,25 +156,21 @@ onBeforeUnmount(clearPreviews);
       </div>
       <a-button @click="load()">刷新</a-button>
     </div>
-    <a-card class="filter-card"
-      ><a-space wrap
-        ><a-select
-          v-model:value="filters.status"
-          allow-clear
-          placeholder="全部状态"
-          style="width: 130px"
-          ><a-select-option value="open">待回复</a-select-option
-          ><a-select-option value="replied">已回复</a-select-option></a-select
-        ><a-input
+    <a-card class="filter-card">
+      <a-tabs :active-key="filters.status" :animated="false" @change="changeStatus">
+        <a-tab-pane key="open" tab="待处理" />
+        <a-tab-pane key="replied" tab="已处理" />
+      </a-tabs>
+      <a-space wrap>
+        <a-input
           v-model:value="filters.keyword"
           allow-clear
           placeholder="搜索用户或反馈内容"
           style="width: 300px"
           @press-enter="search"
         /><a-button type="primary" @click="search">查询</a-button
-        ><a-button @click="reset">重置</a-button></a-space
-      ></a-card
-    >
+        ><a-button @click="reset">重置</a-button></a-space>
+    </a-card>
     <a-card
       ><a-table
         :data-source="rows"
@@ -184,11 +208,12 @@ onBeforeUnmount(clearPreviews);
               statusLabel(record.status)
             }}</a-tag></template
           ></a-table-column
-        ><a-table-column title="操作" key="action" :width="100"
+        ><a-table-column title="操作" key="action" :width="180"
           ><template #default="{ record }"
-            ><a-button type="link" @click="openDetail(record)">{{
-              record.status === "replied" ? "查看回复" : "处理"
-            }}</a-button></template
+            ><a-space><a-button type="link" @click="openDetail(record)">{{
+              record.status === "replied" ? "查看详情" : "处理"
+            }}</a-button
+            ><a-button type="link" danger @click="removeFeedback(record)">删除</a-button></a-space></template
           ></a-table-column
         ></a-table
       ></a-card
