@@ -8,6 +8,7 @@ const auth = useAuthStore()
 const loading = ref(true)
 const saving = ref(false)
 const form = reactive({
+  name: '',
   email: '',
   current_password: '',
   new_password: '',
@@ -18,6 +19,7 @@ async function load() {
   loading.value = true
   try {
     const { data } = await client.get('/v1/admin/profile')
+    form.name = data.user.name
     form.email = data.user.email
     auth.user = data.user
   } catch (error) {
@@ -32,6 +34,10 @@ async function save() {
     message.error('请输入当前密码')
     return
   }
+  if (!form.name.trim()) {
+    message.error('请输入管理员姓名')
+    return
+  }
   if (form.new_password && form.new_password !== form.confirm_password) {
     message.error('两次输入的新密码不一致')
     return
@@ -40,10 +46,12 @@ async function save() {
   try {
     const { data } = await client.patch('/v1/admin/profile', {
       current_password: form.current_password,
+      name: form.name.trim(),
       email: form.email,
       new_password: form.new_password || null,
     })
     auth.user = data.user
+    form.name = data.user.name
     form.email = data.user.email
     form.current_password = ''
     form.new_password = ''
@@ -64,11 +72,14 @@ onMounted(load)
     <div class="page-title">
       <div>
         <h1>个人中心</h1>
-        <p>修改管理员登录邮箱和密码。</p>
+        <p>修改管理员姓名、登录邮箱和密码。</p>
       </div>
     </div>
     <a-card title="登录信息" class="settings-card" :loading="loading">
       <a-form layout="vertical">
+        <a-form-item label="管理员姓名" required>
+          <a-input v-model:value="form.name" maxlength="80" placeholder="请输入管理员姓名" />
+        </a-form-item>
         <a-form-item label="登录邮箱">
           <a-input v-model:value="form.email" type="email" autocomplete="username" />
         </a-form-item>

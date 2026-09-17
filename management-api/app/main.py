@@ -73,6 +73,7 @@ FEEDBACK_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 UPDATE_PLATFORMS = ("windows-x86_64", "darwin-aarch64", "darwin-x86_64")
 UPDATE_PUBLIC_BASE_URL = os.getenv("UPDATE_PUBLIC_BASE_URL", "https://proxy.123371.com").rstrip("/")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
+ADMIN_NAME = os.getenv("ADMIN_NAME", "GoYou 管理员").strip() or "GoYou 管理员"
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
@@ -400,6 +401,7 @@ def database_stats_payload(connection: sqlite3.Connection) -> dict[str, object]:
 REGISTRATION_SETTING_KEY = "registration_enabled"
 DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY = "default_account_valid_days"
 ADMIN_EMAIL_SETTING_KEY = "admin_email"
+ADMIN_NAME_SETTING_KEY = "admin_name"
 ADMIN_PASSWORD_HASH_SETTING_KEY = "admin_password_hash"
 
 
@@ -427,6 +429,11 @@ def registration_enabled(connection: sqlite3.Connection) -> bool:
 def admin_email(connection: sqlite3.Connection) -> str:
     row = connection.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_EMAIL_SETTING_KEY,)).fetchone()
     return str(row["value"]).strip().lower() if row else ADMIN_EMAIL
+
+
+def admin_name(connection: sqlite3.Connection) -> str:
+    row = connection.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_NAME_SETTING_KEY,)).fetchone()
+    return str(row["value"]).strip() if row and str(row["value"]).strip() else ADMIN_NAME
 
 
 def admin_password_hash(connection: sqlite3.Connection) -> str:
@@ -878,6 +885,10 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
                 (ADMIN_EMAIL_SETTING_KEY, ADMIN_EMAIL, iso(now())),
             )
+        connection.execute(
+            "INSERT OR IGNORE INTO system_settings(key, value, updated_at) VALUES (?, ?, ?)",
+            (ADMIN_NAME_SETTING_KEY, ADMIN_NAME, iso(now())),
+        )
         if ADMIN_PASSWORD_HASH or ADMIN_PASSWORD:
             initial_password_hash = ADMIN_PASSWORD_HASH or password_hasher.hash(ADMIN_PASSWORD)
             connection.execute(
@@ -1023,6 +1034,7 @@ class AdminSettingsUpdateRequest(BaseModel):
 class AdminProfileUpdateRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
     email: EmailStr | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=80)
     new_password: str | None = Field(default=None, min_length=8, max_length=128)
 
 
@@ -1198,7 +1210,7 @@ def current_admin(credentials: Annotated[HTTPAuthorizationCredentials | None, De
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="管理员登录已过期") from None
     with db() as connection:
-        return {"email": admin_email(connection), "name": "GoYou 管理员"}
+        return {"email": admin_email(connection), "name": admin_name(connection)}
 
 
 def current_metering_agent(
@@ -2058,6 +2070,7 @@ def admin_login(payload: AdminLoginRequest) -> dict:
     email = str(payload.email).lower()
     with db() as connection:
         configured_email = admin_email(connection)
+        configured_name = admin_name(connection)
         configured_password_hash = admin_password_hash(connection)
     if not configured_email or not configured_password_hash:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="管理员账号尚未配置")
@@ -2066,7 +2079,7 @@ def admin_login(payload: AdminLoginRequest) -> dict:
     return {
         "access_token": admin_access_token(),
         "token_type": "bearer",
-        "user": {"email": configured_email, "name": "GoYou 管理员"},
+        "user": {"email": configured_email, "name": configured_name},
     }
 
 
@@ -2095,7 +2108,10 @@ def admin_update_profile(
         configured_hash = admin_password_hash(connection)
         if not configured_hash or not verify_admin_password(payload.current_password, configured_hash):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="当前密码不正确")
+        if payload.name is not None and not payload.name.strip():
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="管理员姓名不能为空")
         next_email = str(payload.email).lower() if payload.email is not None else admin_email(connection)
+        next_name = payload.name.strip() if payload.name is not None else admin_name(connection)
         next_password_hash = password_hasher.hash(payload.new_password) if payload.new_password else configured_hash
         updated_at = iso(now())
         connection.execute(
@@ -2106,9 +2122,14 @@ def admin_update_profile(
         connection.execute(
             "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (ADMIN_NAME_SETTING_KEY, next_name, updated_at),
+        )
+        connection.execute(
+            "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             (ADMIN_PASSWORD_HASH_SETTING_KEY, next_password_hash, updated_at),
         )
-    return {"user": {"email": next_email, "name": "GoYou 管理员"}}
+    return {"user": {"email": next_email, "name": next_name}}
 
 
 @app.get("/v1/admin/settings")
