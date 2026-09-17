@@ -112,3 +112,38 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  cleanup-old-releases:
+    name: 清理旧版本 Release
+    needs: build-and-release
+    if: needs.build-and-release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 保留最新三个 Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              { owner, repo, per_page: 100 },
+            );
+            const published = releases
+              .filter((release) => !release.draft)
+              .sort((a, b) => {
+                const dateA = new Date(a.published_at || a.created_at).getTime();
+                const dateB = new Date(b.published_at || b.created_at).getTime();
+                return dateB - dateA;
+              });
+            const keep = new Set(published.slice(0, 3).map((release) => release.id));
+            for (const release of published.slice(3)) {
+              if (keep.has(release.id)) continue;
+              core.info(`删除旧 Release：${release.tag_name}`);
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              });
+            }
