@@ -23,6 +23,8 @@ const SSH_USER: &str = "root";
 const SSH_KNOWN_HOSTS_FILE: &str = "known_hosts";
 const GIT_PROXY: &str = "socks5h://127.0.0.1:7890";
 const CONTROL_PLANE_URL: &str = "https://goyou.123371.com";
+const DIAGNOSTIC_SAMPLE_COUNT: usize = 5;
+const DIAGNOSTIC_AVERAGE_COUNT: usize = 3;
 
 // A manual stop cancels any in-flight proxy operation.
 static MANUAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -653,6 +655,58 @@ fn validate_local_socks() -> Result<(), String> {
         .read_exact(&mut address)
         .map_err(|error| format!("读取代理节点连接地址失败：{error}"))?;
     Ok(())
+}
+
+async fn probe_endpoint_samples(
+    client: &reqwest::Client,
+    url: &'static str,
+    method: reqwest::Method,
+) -> (Result<u16, String>, u64) {
+    let mut samples: Vec<(u64, u16)> = Vec::with_capacity(DIAGNOSTIC_SAMPLE_COUNT);
+    let mut last_error = None;
+    for _ in 0..DIAGNOSTIC_SAMPLE_COUNT {
+        let started = Instant::now();
+        let outcome = client
+            .request(method.clone(), url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|response| {
+                let status = response.status();
+                if status.is_success() || status.is_redirection() {
+                    Ok(status.as_u16())
+                } else {
+                    Err(format!("HTTP {}", status.as_u16()))
+                }
+            });
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok(status) => samples.push((elapsed_ms, status)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if samples.is_empty() {
+        return (
+            Err(last_error.unwrap_or_else(|| "未收到有效响应".to_string())),
+            0,
+        );
+    }
+
+    // Average the samples closest to the median so a one-off DNS, TCP or
+    // TLS delay does not inflate the latency shown to the user.
+    let median = {
+        let mut values: Vec<u64> = samples.iter().map(|(latency, _)| *latency).collect();
+        values.sort_unstable();
+        values[values.len() / 2]
+    };
+    samples.sort_by_key(|(latency, _)| latency.abs_diff(median));
+    let selected = samples
+        .iter()
+        .take(DIAGNOSTIC_AVERAGE_COUNT.min(samples.len()))
+        .collect::<Vec<_>>();
+    let average = selected.iter().map(|(latency, _)| *latency).sum::<u64>() / selected.len() as u64;
+    let status = selected[0].1;
+    (Ok(status), average)
 }
 
 fn configured_relay_endpoint() -> Option<(String, u16)> {
@@ -1344,41 +1398,13 @@ pub async fn diagnose_goyou() -> Diagnostic {
         .build();
     let (github_outcome, latency_ms, google_outcome, google_latency_ms) = match client {
         Ok(client) => {
-            let github_client = client.clone();
-            let github_request = async move {
-                let started = Instant::now();
-                let outcome = github_client
-                    .head("https://github.com/")
-                    .send()
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|response| {
-                        let status = response.status();
-                        if status.is_success() || status.is_redirection() {
-                            Ok(status.as_u16())
-                        } else {
-                            Err(format!("HTTP {}", status.as_u16()))
-                        }
-                    });
-                (outcome, started.elapsed().as_millis() as u64)
-            };
-            let google_request = async move {
-                let started = Instant::now();
-                let outcome = client
-                    .get("https://www.google.com/generate_204")
-                    .send()
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|response| {
-                        let status = response.status();
-                        if status.is_success() || status.is_redirection() {
-                            Ok(status.as_u16())
-                        } else {
-                            Err(format!("HTTP {}", status.as_u16()))
-                        }
-                    });
-                (outcome, started.elapsed().as_millis() as u64)
-            };
+            let github_request =
+                probe_endpoint_samples(&client, "https://github.com/", reqwest::Method::HEAD);
+            let google_request = probe_endpoint_samples(
+                &client,
+                "https://www.google.com/generate_204",
+                reqwest::Method::GET,
+            );
             let ((github_outcome, latency_ms), (google_outcome, google_latency_ms)) =
                 tokio::join!(github_request, google_request);
             (
