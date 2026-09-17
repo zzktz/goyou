@@ -143,10 +143,10 @@
   <body>
     <main class="page">
       <h1>GoYou 系统拓扑图</h1>
-      <p class="subtitle">登录控制面、桌面端本地代理客户端、管理服务器中转节点、服务器间隧道和真实出口服务器的完整关系。</p>
+      <p class="subtitle">登录控制面、桌面端本地代理客户端、多 Relay 数据面、国内直连/国外代理分流和真实出口服务器的完整关系。</p>
 
       <div class="notice">
-        <strong>关键结论：</strong>最终用户只下载 GoYou、登录并点击“开启代理”即可。发布包需要自带本机 Shadowsocks 客户端；用户不需要另外安装 sing-box。
+        <strong>关键结论：</strong>最终用户只下载 GoYou、登录并点击“开启代理”即可。发布包自带 sing-box sidecar 和国内分流规则；用户不需要另外安装 sing-box，后台会为每个租约选择可用 Relay 节点。
       </div>
 
       <section class="section">
@@ -160,7 +160,7 @@
             </div>
             <div class="node">
               <strong>本机 Shadowsocks 客户端</strong>
-              <span>发布包内置的 sing-box sidecar，或未来的 Rust 原生实现</span>
+              <span>发布包内置 sing-box sidecar，加载国内 rule_set 并按目标分流；未来可替换为 Rust 原生实现</span>
             </div>
             <div class="node">
               <strong>本地 SOCKS5</strong>
@@ -193,28 +193,39 @@
           <div class="arrow">→<small>Shadowsocks<br />加密数据流</small></div>
 
           <div class="zone relay">
-            <h3>管理服务器 <small>数据面</small></h3>
+            <h3>Relay 节点池 <small>数据面</small></h3>
             <div class="node">
-              <strong>sing-box relay</strong>
-              <span>接收 GoYou 客户端连接；管理服务器承载中转流量</span>
+              <strong>多个独立 sing-box relay</strong>
+              <ul>
+                <li>后台按权重和活跃租约分配节点</li>
+                <li>每个节点拥有独立端口范围和 Agent Token</li>
+                <li>客户端错误只显示 Relay 名称，不暴露节点地址</li>
+              </ul>
             </div>
             <div class="node">
-              <strong>SSH / WireGuard 隧道入口</strong>
-              <span>通过私有链路访问真实出口服务器，不把出口直接暴露给用户</span>
+              <strong>节点示例</strong>
+              <ul>
+                <li>管理服务器 Relay：通过私有隧道访问出口</li>
+                <li>真实代理服务器 Relay：与本机 egress 同机部署</li>
+              </ul>
+            </div>
+            <div class="node">
+              <strong>心跳与流量计量</strong>
+              <span>Relay Agent 同步自己的租约、上报进程/端口健康和用户流量，后台总览统一展示。</span>
             </div>
           </div>
 
-          <div class="arrow">→<small>私有隧道<br />转发</small></div>
+          <div class="arrow">→<small>节点出站<br />链路</small></div>
 
           <div class="zone egress">
             <h3>真实代理服务器 <small>出口面</small></h3>
             <div class="node">
               <strong>sing-box egress</strong>
-              <span>只通过隧道接受管理服务器流量</span>
+              <span>接受管理服务器 Relay 经私有隧道转发的流量，也可供同机 Relay 直接连接</span>
             </div>
             <div class="node">
               <strong>direct outbound</strong>
-              <span>由这台服务器访问 GitHub 和其他互联网目标</span>
+              <span>由出口服务器访问 GitHub 和其他互联网目标，不向最终用户暴露出口服务</span>
             </div>
           </div>
         </div>
@@ -242,8 +253,9 @@
             <h3>数据链路：实际代理流量</h3>
             <ol>
               <li>浏览器、Git 或系统应用连接本机 <code>127.0.0.1:7890</code>。</li>
-              <li>本机客户端将 SOCKS 请求封装为 Shadowsocks。</li>
-              <li>管理服务器 relay 接收并转发到出口服务器。</li>
+              <li>本机 sing-box 按 <code>geosite-cn</code>、<code>geoip-cn</code> 规则分流。</li>
+              <li>国内域名/IP 走本地直连；国外或未知目标走后台分配的 Relay。</li>
+              <li>Relay 节点接收加密流量，必要时经私有隧道转发到 egress。</li>
               <li>出口服务器访问目标网站并返回响应。</li>
             </ol>
           </div>
@@ -254,8 +266,8 @@
         <h2>三、用户点击“开启代理”时发生什么</h2>
         <div class="path">
           <div class="step"><b>1. 校验登录</b><span>检查 token 和会员状态</span></div>
-          <div class="step"><b>2. 获取租约</b><span>节点地址、端口、密码、过期时间</span></div>
-          <div class="step"><b>3. 启动本机客户端</b><span>使用内置 sing-box 或原生实现</span></div>
+          <div class="step"><b>2. 获取租约</b><span>Relay 名称、地址、端口、密码、过期时间</span></div>
+          <div class="step"><b>3. 启动本机客户端</b><span>加载内置 sing-box 和国内 rule_set</span></div>
           <div class="step"><b>4. 监听本地端口</b><span>确认 127.0.0.1:7890 可用</span></div>
           <div class="step"><b>5. 开启系统代理</b><span>浏览器、Git 等应用开始走代理</span></div>
         </div>
@@ -292,19 +304,19 @@
       <section class="section">
         <h2>五、为什么不能让系统直接连接管理服务器 relay</h2>
         <p>当前 relay 对外提供的是 Shadowsocks 协议，而 macOS/Windows 的系统代理设置通常只支持普通 HTTP 或 SOCKS5，不理解 Shadowsocks。于是本机需要一个协议转换层：</p>
-        <p><code>系统 SOCKS5 → 本机 Shadowsocks 客户端 → 远端 Shadowsocks relay</code></p>
+        <p><code>系统 SOCKS5 → 本机 sing-box →（国内目标）本地直连 /（国外目标）远端 Shadowsocks relay</code></p>
         <p>如果未来把 relay 改成公网 SOCKS5，理论上可以取消本机客户端，但会暴露普通代理端口、增加账号滥用风险，也失去 Shadowsocks 的加密封装，因此不建议。</p>
       </section>
 
       <section class="section">
-        <h2>六、推荐落地顺序</h2>
+        <h2>六、当前实现与运维重点</h2>
         <ol>
-          <li>开发阶段允许使用 Homebrew 安装 sing-box，验证登录、租约和完整链路。</li>
-          <li>为 macOS Intel、macOS Apple Silicon、Windows x64 分别准备 sing-box sidecar。</li>
-          <li>将 sidecar 加入 Tauri 的 resources，并由 Rust 根据平台选择对应文件。</li>
+          <li>管理后台维护多个 Relay 的名称、地址、端口范围、权重、启用/排空状态和 Agent Token。</li>
+          <li>管理 API 为新租约分配 Relay 和独立端口，Relay Agent 只同步属于自己的租约。</li>
+          <li>后台总览持续检查 Relay 心跳、进程状态、缺失端口、重复端口和流量计量。</li>
+          <li>客户端发行包按 macOS Intel、macOS Apple Silicon、Windows x64 携带对应 sing-box sidecar 与规则集。</li>
           <li>发行包签名；macOS 对主应用和 sidecar 一并签名并 notarize。</li>
-          <li>GoYou 首次启动只需登录，不要求用户安装任何额外软件。</li>
-          <li>后续再评估用 Rust 原生 Shadowsocks 实现替换 sidecar。</li>
+          <li>后续可评估用 Rust 原生 Shadowsocks 实现替换 sidecar，但不改变控制面和多 Relay 架构。</li>
         </ol>
       </section>
     </main>
