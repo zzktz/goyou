@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import smtplib
+import shutil
 import sqlite3
 import threading
 import urllib.error
@@ -2503,8 +2504,6 @@ def admin_unpublish_release(release_id: str, admin: Annotated[dict[str, str], De
 def admin_delete_release(release_id: str, admin: Annotated[dict[str, str], Depends(current_admin)]) -> None:
     with db() as connection:
         release = _release_or_404(connection, release_id)
-        if release["status"] != "draft":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已发布版本不能删除，请先撤回")
         if release["download_status"] == "downloading":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="自动下载进行中，请等待下载结束后再删除")
         paths = connection.execute("SELECT storage_path FROM app_release_assets WHERE release_id = ?", (release_id,)).fetchall()
@@ -2512,11 +2511,8 @@ def admin_delete_release(release_id: str, admin: Annotated[dict[str, str], Depen
     for path in paths:
         Path(path["storage_path"]).unlink(missing_ok=True)
     release_dir = UPDATE_STORAGE_DIR.resolve() / release_id
-    if release_dir.exists():
-        try:
-            release_dir.rmdir()
-        except OSError:
-            pass
+    if release_dir.is_dir() and not release_dir.is_symlink():
+        shutil.rmtree(release_dir)
     return None
 
 
