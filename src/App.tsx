@@ -1108,7 +1108,6 @@ function Dashboard({
     setUpdateProgress(0);
     setUpdateError(null);
     try {
-      await invoke("disable_goyou");
       let downloaded = 0;
       let total = 0;
       await availableUpdate.downloadAndInstall((event: DownloadEvent) => {
