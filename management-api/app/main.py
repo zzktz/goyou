@@ -131,6 +131,79 @@ def monthly_usage_period(value: datetime | None = None) -> tuple[calendar_date, 
     return calendar_date(start_year, start_month, 10), calendar_date(end_year, end_month, 10)
 
 
+def daily_usage_payload(connection: sqlite3.Connection, target_date: str | None = None) -> dict[str, object]:
+    usage_day = target_date or usage_date()
+    row = connection.execute(
+        """SELECT COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
+                  COALESCE(SUM(download_bytes), 0) AS download_bytes,
+                  COALESCE(SUM(total_bytes), 0) AS total_bytes
+           FROM daily_usage
+           WHERE usage_date = ?""",
+        (usage_day,),
+    ).fetchone()
+    upload_bytes = int(row["upload_bytes"] or 0)
+    download_bytes = int(row["download_bytes"] or 0)
+    used_bytes = int(row["total_bytes"] or upload_bytes + download_bytes)
+    return {
+        "date": usage_day,
+        "timezone": QUOTA_TIMEZONE,
+        "upload_bytes": upload_bytes,
+        "download_bytes": download_bytes,
+        "used_bytes": used_bytes,
+    }
+
+
+def recent_usage_payload(
+    connection: sqlite3.Connection,
+    reference_date: str | None = None,
+    days: int = 10,
+) -> dict[str, object]:
+    days = max(1, days)
+    end_date = calendar_date.fromisoformat(reference_date or usage_date())
+    start_date = end_date - timedelta(days=days - 1)
+    rows = connection.execute(
+        """SELECT usage_date,
+                  COALESCE(SUM(upload_bytes), 0) AS upload_bytes,
+                  COALESCE(SUM(download_bytes), 0) AS download_bytes,
+                  COALESCE(SUM(total_bytes), 0) AS total_bytes
+           FROM daily_usage
+           WHERE usage_date >= ? AND usage_date <= ?
+           GROUP BY usage_date""",
+        (start_date.isoformat(), end_date.isoformat()),
+    ).fetchall()
+    values = {
+        row["usage_date"]: {
+            "date": row["usage_date"],
+            "upload_bytes": int(row["upload_bytes"] or 0),
+            "download_bytes": int(row["download_bytes"] or 0),
+            "used_bytes": int(
+                row["total_bytes"]
+                or int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0)
+            ),
+        }
+        for row in rows
+    }
+    items = [
+        values.get(
+            current_date.isoformat(),
+            {
+                "date": current_date.isoformat(),
+                "upload_bytes": 0,
+                "download_bytes": 0,
+                "used_bytes": 0,
+            },
+        )
+        for current_date in (start_date + timedelta(days=index) for index in range(days))
+    ]
+    return {
+        "period_start": start_date.isoformat(),
+        "period_end": end_date.isoformat(),
+        "timezone": QUOTA_TIMEZONE,
+        "items": items,
+        "max_bytes": max((int(item["used_bytes"]) for item in items), default=0),
+    }
+
+
 def monthly_usage_payload(connection: sqlite3.Connection) -> dict[str, object]:
     period_start, period_end = monthly_usage_period()
     row = connection.execute(
@@ -157,6 +230,8 @@ def monthly_usage_payload(connection: sqlite3.Connection) -> dict[str, object]:
         "remaining_bytes": max(quota_bytes - used_bytes, 0),
         "percentage": percentage,
         "exceeded": used_bytes >= quota_bytes,
+        "today_usage": daily_usage_payload(connection),
+        "recent_usage": recent_usage_payload(connection),
     }
 
 

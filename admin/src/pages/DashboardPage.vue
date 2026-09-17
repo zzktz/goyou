@@ -23,6 +23,12 @@ function formatBytes(value) {
   return `${amount.toFixed(precision)} ${units[index]}`
 }
 function monthlyUsageColor(usage) { return usage?.exceeded ? '#cf1322' : usage?.percentage >= 80 ? '#d48806' : '#1677ff' }
+function usageBarHeight(item, usage) {
+  const max = Number(usage?.max_bytes || 0)
+  const value = Number(item?.used_bytes || 0)
+  return max > 0 ? Math.max(6, Math.round((value / max) * 100)) : 6
+}
+function usageBarTitle(item) { return `${item.date}：${formatGigabytes(item.used_bytes)}（上传 ${formatGigabytes(item.upload_bytes)}，下载 ${formatGigabytes(item.download_bytes)}）` }
 function relayStatusColor(value) { return value === 'ok' ? 'success' : value === 'warning' ? 'warning' : 'error' }
 function relayHealthText(relay) { return relay.health?.status === 'ok' ? '正常' : relay.health?.status === 'warning' ? '需关注' : '异常' }
 async function load() {
@@ -49,12 +55,25 @@ onMounted(load)
           <div class="monthly-usage-details">
             <div class="monthly-usage-total"><strong>{{ formatGigabytes(data.monthly_usage.used_bytes) }}</strong><span> / {{ formatGigabytes(data.monthly_usage.quota_bytes) }}</span></div>
             <div class="monthly-usage-label">已使用 / 月度固定额度</div>
+            <div class="today-usage-summary">
+              <div><span>今日流量</span><strong>{{ formatGigabytes(data.monthly_usage.today_usage?.used_bytes) }}</strong></div>
+              <span class="muted">上传 {{ formatGigabytes(data.monthly_usage.today_usage?.upload_bytes) }} · 下载 {{ formatGigabytes(data.monthly_usage.today_usage?.download_bytes) }}</span>
+            </div>
             <a-descriptions :column="1" size="small">
               <a-descriptions-item label="统计周期">{{ data.monthly_usage.period_start }} 00:00 至 {{ data.monthly_usage.period_end }} 00:00（每月 10 日切换）</a-descriptions-item>
               <a-descriptions-item label="剩余流量">{{ formatGigabytes(data.monthly_usage.remaining_bytes) }}</a-descriptions-item>
               <a-descriptions-item label="上传 / 下载">{{ formatGigabytes(data.monthly_usage.upload_bytes) }} / {{ formatGigabytes(data.monthly_usage.download_bytes) }}</a-descriptions-item>
             </a-descriptions>
             <a-alert v-if="data.monthly_usage.exceeded" type="error" show-icon message="本月流量额度已用尽" />
+            <div v-if="data.monthly_usage.recent_usage" class="usage-trend">
+              <div class="usage-trend-header"><strong>最近 10 天</strong><span class="muted">单位：GB</span></div>
+              <div class="usage-chart" role="img" aria-label="最近 10 天流量统计">
+                <div v-for="item in data.monthly_usage.recent_usage.items" :key="item.date" class="usage-chart-column">
+                  <div class="usage-chart-track"><div class="usage-chart-bar" :style="{ height: `${usageBarHeight(item, data.monthly_usage.recent_usage)}%` }" :title="usageBarTitle(item)" /></div>
+                  <span>{{ item.date.slice(5) }}</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </a-card></a-col>

@@ -11,8 +11,10 @@ os.environ.setdefault("JWT_SECRET", "test-secret-that-is-at-least-32-characters"
 from app.main import (  # noqa: E402
     RELAY_PORT,
     allocate_relay_port,
+    daily_usage_payload,
     monthly_usage_period,
     normalize_relay_ports,
+    recent_usage_payload,
     relay_port_is_available,
     relay_health_payload,
     allocate_from_relay_candidates,
@@ -214,6 +216,42 @@ class MultiRelayPortTests(unittest.TestCase):
 
         self.assertEqual(relay["id"], "two")
         self.assertEqual(port, 30000)
+
+
+class UsageSummaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            """CREATE TABLE daily_usage (
+                   user_id TEXT NOT NULL,
+                   usage_date TEXT NOT NULL,
+                   upload_bytes INTEGER NOT NULL,
+                   download_bytes INTEGER NOT NULL,
+                   total_bytes INTEGER NOT NULL
+               )"""
+        )
+
+    def tearDown(self) -> None:
+        self.connection.close()
+
+    def test_today_and_recent_usage_fill_missing_days(self) -> None:
+        self.connection.executemany(
+            "INSERT INTO daily_usage VALUES (?, ?, ?, ?, ?)",
+            [
+                ("one", "2026-09-08", 100, 900, 1000),
+                ("two", "2026-09-08", 50, 450, 500),
+                ("one", "2026-09-10", 200, 1800, 2000),
+            ],
+        )
+
+        today = daily_usage_payload(self.connection, "2026-09-10")
+        recent = recent_usage_payload(self.connection, "2026-09-10", days=3)
+
+        self.assertEqual(today["used_bytes"], 2000)
+        self.assertEqual(today["upload_bytes"], 200)
+        self.assertEqual([item["used_bytes"] for item in recent["items"]], [0, 1500, 2000])
+        self.assertEqual(recent["max_bytes"], 2000)
 
 
 if __name__ == "__main__":
