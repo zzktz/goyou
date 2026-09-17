@@ -147,3 +147,20 @@ jobs:
                 release_id: release.id,
               });
             }
+
+            // Release 删除后同步清理旧的 GoYou 版本标签，避免标签页继续堆积。
+            const keepTags = new Set(published.slice(0, 3).map((release) => release.tag_name));
+            const tags = await github.paginate(
+              github.rest.repos.listTags,
+              { owner, repo, per_page: 100 },
+            );
+            for (const tag of tags) {
+              if (!/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag.name)) continue;
+              if (keepTags.has(tag.name)) continue;
+              core.info(`删除旧版本标签：${tag.name}`);
+              await github.rest.git.deleteRef({
+                owner,
+                repo,
+                ref: `tags/${tag.name}`,
+              });
+            }
