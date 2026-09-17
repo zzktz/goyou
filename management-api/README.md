@@ -61,7 +61,7 @@ SQLite 数据库默认使用 WAL 模式和 5 秒 busy timeout。`usage_reports` 
 - `GET /healthz`
 - `GET /v1/app/update/latest` (返回后台已发布的签名更新清单)
 - `GET /v1/app/update/assets/{version}/{platform}` (下载已发布的更新包)
-- `GET /v1/admin/releases`
+- `GET /v1/admin/releases`（支持 `page`、`page_size` 分页）
 - `POST /v1/admin/releases`
 - `PATCH /v1/admin/releases/{release_id}`
 - `POST /v1/admin/releases/{release_id}/assets/{platform}` (multipart: `artifact` + `signature`)

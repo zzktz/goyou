@@ -2223,11 +2223,20 @@ def _download_github_asset(asset: dict, destination: Path) -> tuple[int, str]:
 
 
 @app.get("/v1/admin/releases")
-def admin_releases(admin: Annotated[dict[str, str], Depends(current_admin)]) -> dict:
+def admin_releases(
+    admin: Annotated[dict[str, str], Depends(current_admin)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+) -> dict:
     with db() as connection:
         items = _release_rows(connection)
     items.sort(key=lambda item: (_version_key(item["version"]), item["created_at"]), reverse=True)
-    return {"items": items}
+    total = len(items)
+    offset = (page - 1) * page_size
+    return {
+        "items": items[offset : offset + page_size],
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+    }
 
 
 @app.post("/v1/admin/releases", status_code=status.HTTP_201_CREATED)

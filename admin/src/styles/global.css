@@ -557,6 +557,10 @@ body {
   gap: 8px;
   margin-top: 16px;
 }
+.release-pagination {
+  margin-top: 20px;
+  text-align: right;
+}
 .feedback-detail-block {
   margin-top: 18px;
 }
