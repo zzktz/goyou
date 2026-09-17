@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [{ "label": "main", "title": "GoYou", "width": 450, "height": 496, "minWidth": 400, "minHeight": 416, "visible": false, "resizable": true, "center": true }],
-    "security": { "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://proxy.123371.com; style-src 'self' 'unsafe-inline'" }
+    "security": { "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://goyou.123371.com; style-src 'self' 'unsafe-inline'" }
   },
   "bundle": {
     "active": true,
@@ -31,7 +31,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFDNjk3OEI1NEJCQzk3QTUKUldTbGw3eEx0WGhwck45WFFYSURId040dlVnamFhZWtaemFzcE1TZUFzVTdpT0o4dy9vei9PNFAK",
       "endpoints": [
-        "https://proxy.123371.com/v1/app/update/latest?target={{target}}&arch={{arch}}&current_version={{current_version}}"
+        "https://goyou.123371.com/v1/app/update/latest?target={{target}}&arch={{arch}}&current_version={{current_version}}"
       ]
     }
   }

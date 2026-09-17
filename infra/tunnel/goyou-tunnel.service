@@ -16,7 +16,7 @@ ExecStart=/usr/bin/ssh -N -T \
   -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/var/lib/goyou-tunnel/known_hosts \
   -R 127.0.0.1:19080:127.0.0.1:1080 \
-  goyou-tunnel@81.69.20.120
+  goyou-tunnel@管理服务器地址（见 docs/敏感信息.md）
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

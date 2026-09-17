@@ -17,12 +17,12 @@ use tauri::{AppHandle, Manager};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 7890;
-const SSH_HOST: &str = "154.21.84.35";
+const SSH_HOST: &str = "lsj.proxy.123371.com";
 const SSH_PORT: u16 = 12581;
 const SSH_USER: &str = "root";
 const SSH_KNOWN_HOSTS_FILE: &str = "known_hosts";
 const GIT_PROXY: &str = "socks5h://127.0.0.1:7890";
-const CONTROL_PLANE_URL: &str = "https://proxy.123371.com";
+const CONTROL_PLANE_URL: &str = "https://goyou.123371.com";
 
 // A manual stop cancels any in-flight proxy operation.
 static MANUAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);

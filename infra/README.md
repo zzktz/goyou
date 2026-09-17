@@ -35,7 +35,7 @@ RELAY_TOKEN=后台生成的 Token
 ```text
 HTTP_PROXY=http://127.0.0.1:18081
 HTTPS_PROXY=http://127.0.0.1:18081
-NO_PROXY=127.0.0.1,localhost,proxy.123371.com
+NO_PROXY=127.0.0.1,localhost,goyou.123371.com
 ```
 
 该代理只监听回环地址，不应开放防火墙端口，也不要修改 relay 自动生成的 `relay.json`。

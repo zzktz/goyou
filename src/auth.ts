@@ -84,7 +84,7 @@ const REMEMBERED_LOGIN_KEY = "goyou.login.remembered";
 const DEVICE_ID_KEY = "goyou.device.id";
 const LEGACY_DEVICE_ID_KEY = "proxyswitch.device.id";
 export const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL || "https://proxy.123371.com"
+  import.meta.env.VITE_API_BASE_URL || "https://goyou.123371.com"
 ).replace(/\/$/, "");
 
 export function formatErrorMessage(error: unknown): string {
