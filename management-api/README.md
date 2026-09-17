@@ -69,6 +69,8 @@ SQLite 数据库默认使用 WAL 模式和 5 秒 busy timeout。`usage_reports` 
 - `POST /v1/admin/releases/{release_id}/unpublish`
 - `DELETE /v1/admin/releases/{release_id}`
 
+版本删除接口可删除草稿或已发布版本（下载中的版本除外），并会同时清理该版本的数据库记录、所有平台更新包、签名文件及版本存储目录。
+
 管理员账号由 `ADMIN_EMAIL` 与 `ADMIN_PASSWORD_HASH`（推荐）或 `ADMIN_PASSWORD` 配置，不与客户端普通用户账号共用令牌。管理员令牌的 JWT 类型独立为 `admin_access`，不能调用客户端接口。
 
 运行总览中的月度流量按 `QUOTA_TIMEZONE` 统计，每个周期从当月 10 日 00:00 到下月 10 日 00:00，固定额度为 1000 GB，并汇总所有用户的上传和下载用量。
