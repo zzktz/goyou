@@ -422,6 +422,15 @@ def system_setting_int(connection: sqlite3.Connection, key: str, default: int) -
         return default
 
 
+def set_system_setting(connection: sqlite3.Connection, key: str, value: str) -> None:
+    """Persist a setting whether or not an older database has its seed row."""
+    connection.execute(
+        "INSERT INTO system_settings(key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (key, value, iso(now())),
+    )
+
+
 def registration_enabled(connection: sqlite3.Connection) -> bool:
     return system_setting_bool(connection, REGISTRATION_SETTING_KEY, True)
 
@@ -2157,10 +2166,7 @@ def admin_update_settings(
         if payload.default_account_valid_days is not None:
             updates.append((DEFAULT_ACCOUNT_VALID_DAYS_SETTING_KEY, str(payload.default_account_valid_days)))
         for key, value in updates:
-            connection.execute(
-                "UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?",
-                (value, iso(now()), key),
-            )
+            set_system_setting(connection, key, value)
         return {
             "registration_enabled": registration_enabled(connection),
             "default_account_valid_days": system_setting_int(

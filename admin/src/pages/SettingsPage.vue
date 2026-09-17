@@ -32,11 +32,19 @@ async function save() {
     registrationEnabled.value = data.registration_enabled
     defaultAccountValidDays.value = data.default_account_valid_days
     message.success('设置已保存')
+    return true
   } catch (error) {
     if (!error.goyouAdminAuthExpired) message.error(error.response?.data?.detail || '系统设置保存失败')
+    return false
   } finally {
     saving.value = false
   }
+}
+
+async function saveRegistration(checked) {
+  registrationEnabled.value = checked
+  const saved = await save()
+  if (!saved) registrationEnabled.value = !checked
 }
 
 onMounted(load)
@@ -69,11 +77,12 @@ onMounted(load)
         <a-form-item label="开放注册">
           <a-switch
             v-model:checked="registrationEnabled"
+            @change="saveRegistration"
             checked-children="开启"
             un-checked-children="关闭"
             :loading="loading || saving"
           />
-          <span class="setting-hint">关闭后，客户端将无法获取注册验证码或创建新账号。</span>
+          <span class="setting-hint">修改后自动保存；关闭后，客户端将无法获取注册验证码或创建新账号。</span>
         </a-form-item>
         <a-form-item label="新用户默认有效期">
           <a-input-number
