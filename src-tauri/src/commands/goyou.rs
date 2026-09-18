@@ -25,6 +25,8 @@ const GIT_PROXY: &str = "socks5h://127.0.0.1:7890";
 const CONTROL_PLANE_URL: &str = "https://goyou.123371.com";
 const DIAGNOSTIC_SAMPLE_COUNT: usize = 5;
 const DIAGNOSTIC_AVERAGE_COUNT: usize = 3;
+const LOCAL_SOCKS_VALIDATION_ATTEMPTS: usize = 3;
+const LOCAL_SOCKS_RETRY_DELAY: Duration = Duration::from_millis(350);
 
 // A manual stop cancels any in-flight proxy operation.
 static MANUAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -657,6 +659,32 @@ fn validate_local_socks() -> Result<(), String> {
     Ok(())
 }
 
+fn is_transient_local_socks_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("resource temporarily unavailable")
+        || normalized.contains("operation would block")
+        || normalized.contains("timed out")
+        || error.contains("超时")
+}
+
+fn validate_local_socks_with_retry() -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..LOCAL_SOCKS_VALIDATION_ATTEMPTS {
+        match validate_local_socks() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let retryable = is_transient_local_socks_error(&error);
+                last_error = Some(error);
+                if !retryable || attempt + 1 == LOCAL_SOCKS_VALIDATION_ATTEMPTS {
+                    break;
+                }
+                thread::sleep(LOCAL_SOCKS_RETRY_DELAY);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "本地代理验证失败。".to_string()))
+}
+
 async fn probe_endpoint_samples(
     client: &reqwest::Client,
     url: &'static str,
@@ -901,7 +929,7 @@ fn start_singbox(app: &AppHandle, lease: &ProxyLease) -> Result<(), String> {
     })?;
     for _ in 0..30 {
         if port_open() {
-            if let Err(error) = validate_local_socks() {
+            if let Err(error) = validate_local_socks_with_retry() {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{error}，未启用系统代理。"));
@@ -1274,6 +1302,11 @@ pub fn recover_stale_proxy() {
 #[tauri::command]
 pub fn get_goyou_status() -> Status {
     status()
+}
+#[tauri::command]
+pub fn check_goyou_proxy() -> bool {
+    let current = status();
+    current.tunnel_running && validate_local_socks().is_ok()
 }
 #[tauri::command]
 pub fn set_auto_launch(enabled: bool) -> Result<bool, String> {

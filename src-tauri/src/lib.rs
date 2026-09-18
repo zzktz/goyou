@@ -121,6 +121,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_goyou_status,
+            commands::check_goyou_proxy,
             commands::enable_goyou,
             commands::disable_goyou,
             commands::diagnose_goyou,

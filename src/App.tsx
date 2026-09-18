@@ -482,6 +482,8 @@ function Dashboard({
   const currentStatus = useRef<Status | null>(null);
   const sessionRefreshInFlight = useRef<Promise<AuthSession> | null>(null);
   const updateCheckInFlight = useRef(false);
+  const wakeRecoveryInFlight = useRef<Promise<void> | null>(null);
+  const lastRefreshStartedAt = useRef(Date.now());
   const accountMenuRef = useRef<HTMLDivElement>(null);
 
   const setInfoMessage = useCallback(
@@ -769,11 +771,87 @@ function Dashboard({
     ],
   );
 
+  const recoverAfterSleep = useCallback(async () => {
+    if (busy || wakeRecoveryInFlight.current) return;
+    const current = currentStatus.current;
+    if (!current?.proxyEnabled || !current.tunnelRunning) return;
+
+    const request = (async () => {
+      const healthy = await invoke<boolean>("check_goyou_proxy");
+      if (healthy) return;
+
+      setInfoMessage("检测到休眠后的代理连接已失效，正在自动恢复…", "warning");
+      const activeSession = await refreshAuthenticatedSession();
+      onSessionRefreshed(activeSession);
+      await invoke("disable_goyou");
+      await invoke("enable_goyou", { lease: activeSession.lease });
+      await refresh(activeSession);
+      setInfoMessage("休眠后的代理连接已自动恢复");
+    })()
+      .catch((error) => {
+        if (isAccountExpiredError(error)) {
+          void handleAccountExpired();
+        } else if (isAuthFailure(error)) {
+          void handleAuthFailure();
+        } else {
+          setInfoMessage(
+            `休眠后代理连接恢复失败：${formatErrorMessage(error)}`,
+            "warning",
+          );
+        }
+      })
+      .finally(() => {
+        if (wakeRecoveryInFlight.current === request) {
+          wakeRecoveryInFlight.current = null;
+        }
+      });
+    wakeRecoveryInFlight.current = request;
+    await request;
+  }, [
+    busy,
+    handleAccountExpired,
+    handleAuthFailure,
+    onSessionRefreshed,
+    refresh,
+    refreshAuthenticatedSession,
+    setInfoMessage,
+  ]);
+
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
+    const foregroundedAt = { current: Date.now() };
+    const checkForWake = () => {
+      const now = Date.now();
+      const elapsed = now - foregroundedAt.current;
+      foregroundedAt.current = now;
+      if (elapsed >= 5 * 60_000) {
+        void recoverAfterSleep();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (!document.hidden) checkForWake();
+    };
+    window.addEventListener("focus", checkForWake);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", checkForWake);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [recoverAfterSleep]);
+
+  useEffect(() => {
+    const runRefresh = () => {
+      const now = Date.now();
+      const elapsed = now - lastRefreshStartedAt.current;
+      lastRefreshStartedAt.current = now;
+      if (elapsed >= 5 * 60_000) {
+        void recoverAfterSleep();
+      }
+      void refresh();
+    };
+    runRefresh();
+    const timer = window.setInterval(runRefresh, 5000);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [recoverAfterSleep, refresh]);
 
   useEffect(() => {
     if (startupRefreshDone.current) return;
