@@ -1306,7 +1306,7 @@ pub fn get_goyou_status() -> Status {
 #[tauri::command]
 pub fn check_goyou_proxy() -> bool {
     let current = status();
-    current.tunnel_running && validate_local_socks().is_ok()
+    current.tunnel_running && validate_local_socks_with_retry().is_ok()
 }
 #[tauri::command]
 pub fn set_auto_launch(enabled: bool) -> Result<bool, String> {

@@ -64,6 +64,9 @@ interface Diagnostic {
 
 type MessageTone = "normal" | "warning";
 
+const WAKE_RECOVERY_GAP_MS = 60_000;
+const WAKE_RECOVERY_RETRY_DELAYS_MS = [0, 1_500, 3_000];
+
 function isAuthFailure(error: unknown): boolean {
   return error instanceof Error && /登录|令牌|401/.test(error.message);
 }
@@ -773,20 +776,65 @@ function Dashboard({
 
   const recoverAfterSleep = useCallback(async () => {
     if (busy || wakeRecoveryInFlight.current) return;
-    const current = currentStatus.current;
-    if (!current?.proxyEnabled || !current.tunnelRunning) return;
 
     const request = (async () => {
+      const current =
+        currentStatus.current ?? (await invoke<Status>("get_goyou_status"));
+      if (!current?.proxyEnabled || !current.tunnelRunning) return;
+
       const healthy = await invoke<boolean>("check_goyou_proxy");
       if (healthy) return;
 
       setInfoMessage("检测到休眠后的代理连接已失效，正在自动恢复…", "warning");
+
+      const enableAndValidate = async (lease: AuthSession["lease"]) => {
+        await invoke("disable_goyou");
+        try {
+          await invoke("enable_goyou", { lease });
+          if (!(await invoke<boolean>("check_goyou_proxy"))) {
+            throw new Error("代理重启后仍无法连接上游节点");
+          }
+        } catch (error) {
+          await invoke("disable_goyou").catch(() => undefined);
+          throw error;
+        }
+      };
+
+      let lastError: unknown;
+      const cachedLease = currentSession.current.lease;
+      for (const delay of WAKE_RECOVERY_RETRY_DELAYS_MS) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+          // The cached one-hour lease is still valid in the common case. Do
+          // not make recovery depend on a control-plane request while the
+          // just-woken network is still rebuilding its routes/DNS state.
+          await enableAndValidate(cachedLease);
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
+        await refresh(currentSession.current);
+        setInfoMessage("休眠后的代理连接已自动恢复");
+        return;
+      }
+
+      // If the cached lease expired or the relay moved, refresh it only after
+      // the local proxy has been taken down, then retry with fresh credentials.
       const activeSession = await refreshAuthenticatedSession();
       onSessionRefreshed(activeSession);
-      await invoke("disable_goyou");
-      await invoke("enable_goyou", { lease: activeSession.lease });
-      await refresh(activeSession);
-      setInfoMessage("休眠后的代理连接已自动恢复");
+      for (const delay of WAKE_RECOVERY_RETRY_DELAYS_MS) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+          await enableAndValidate(activeSession.lease);
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
+        await refresh(activeSession);
+        setInfoMessage("休眠后的代理连接已自动恢复");
+        return;
+      }
+      throw lastError ?? new Error("代理重启失败");
     })()
       .catch((error) => {
         if (isAccountExpiredError(error)) {
@@ -823,7 +871,7 @@ function Dashboard({
       const now = Date.now();
       const elapsed = now - foregroundedAt.current;
       foregroundedAt.current = now;
-      if (elapsed >= 5 * 60_000) {
+      if (elapsed >= WAKE_RECOVERY_GAP_MS) {
         void recoverAfterSleep();
       }
     };
@@ -843,7 +891,7 @@ function Dashboard({
       const now = Date.now();
       const elapsed = now - lastRefreshStartedAt.current;
       lastRefreshStartedAt.current = now;
-      if (elapsed >= 5 * 60_000) {
+      if (elapsed >= WAKE_RECOVERY_GAP_MS) {
         void recoverAfterSleep();
       }
       void refresh();
@@ -870,7 +918,10 @@ function Dashboard({
         if (isAccountExpired(nextSession.user.account_expires_at)) {
           await handleAccountExpired();
         }
-        return refresh(nextSession);
+        await refresh(nextSession);
+        // Also validate a proxy that was already enabled before this window
+        // was created (for example, when the app starts after system wake).
+        return recoverAfterSleep();
       })
       .catch((error) => {
         if (isAccountExpiredError(error)) void handleAccountExpired();
@@ -883,6 +934,7 @@ function Dashboard({
     handleAccountExpired,
     handleAuthFailure,
     onSessionRefreshed,
+    recoverAfterSleep,
     refresh,
     refreshAuthenticatedSession,
   ]);
