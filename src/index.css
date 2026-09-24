@@ -1880,6 +1880,14 @@ input[type="checkbox"] {
   margin-left: auto;
   opacity: 1;
 }
+.dashboard-card header .lease-summary {
+  display: block;
+  margin: 3px 0 0;
+  color: #aebbd0;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
 .dashboard-title-row {
   gap: 11px;
 }
