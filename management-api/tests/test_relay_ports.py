@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sqlite3
 import sys
@@ -250,7 +252,9 @@ class UsageSummaryTests(unittest.TestCase):
 
         self.assertEqual(today["used_bytes"], 2000)
         self.assertEqual(today["upload_bytes"], 200)
-        self.assertEqual([item["used_bytes"] for item in recent["items"]], [0, 1500, 2000])
+        self.assertEqual(
+            [item["used_bytes"] for item in recent["items"]], [1500, 0, 2000]
+        )
         self.assertEqual(recent["max_bytes"], 2000)
 
 
