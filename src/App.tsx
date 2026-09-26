@@ -6,7 +6,13 @@ import {
   type DownloadEvent,
   type Update,
 } from "@tauri-apps/plugin-updater";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import appPackage from "../package.json";
 import {
@@ -66,6 +72,52 @@ type MessageTone = "normal" | "warning";
 
 const WAKE_RECOVERY_GAP_MS = 60_000;
 const WAKE_RECOVERY_RETRY_DELAYS_MS = [0, 1_500, 3_000];
+const THEME_PREFERENCE_KEY = "goyou-theme-preference";
+
+type ThemePreference = "system" | "light" | "dark";
+
+function getStoredThemePreference(): ThemePreference {
+  try {
+    const stored = window.localStorage.getItem(THEME_PREFERENCE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") {
+      return stored;
+    }
+  } catch {
+    // Use the system preference when local storage is unavailable.
+  }
+  return "system";
+}
+
+function applyThemePreference(preference: ThemePreference): void {
+  const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+  document.documentElement.dataset.theme =
+    preference === "system" ? systemTheme : preference;
+}
+
+function ThemeControl({
+  preference,
+  onChange,
+}: {
+  preference: ThemePreference;
+  onChange: (preference: ThemePreference) => void;
+}) {
+  return (
+    <label className="theme-control">
+      <span>主题</span>
+      <select
+        aria-label="主题"
+        onChange={(event) => onChange(event.target.value as ThemePreference)}
+        value={preference}
+      >
+        <option value="system">跟随系统</option>
+        <option value="light">亮色</option>
+        <option value="dark">暗色</option>
+      </select>
+    </label>
+  );
+}
 
 function isAuthFailure(error: unknown): boolean {
   return error instanceof Error && /登录|令牌|401/.test(error.message);
@@ -103,8 +155,12 @@ function formatAccountExpiry(expiryDate: string | null | undefined): string {
 
 function AuthPage({
   onAuthenticated,
+  themePreference,
+  onThemePreferenceChange,
 }: {
   onAuthenticated: (session: AuthSession) => void;
+  themePreference: ThemePreference;
+  onThemePreferenceChange: (preference: ThemePreference) => void;
 }) {
   const rememberedLogin = getRememberedLogin();
   const [mode, setMode] = useState<"login" | "register" | "forgot">("login");
@@ -269,6 +325,10 @@ function AuthPage({
             </div>
             <small>穿越无形的墙，去你心之所向。</small>
           </div>
+          <ThemeControl
+            onChange={onThemePreferenceChange}
+            preference={themePreference}
+          />
         </div>
         <div className="auth-intro">
           <h1 id="auth-title">
@@ -431,10 +491,14 @@ function Dashboard({
   session,
   onLogout,
   onSessionRefreshed,
+  themePreference,
+  onThemePreferenceChange,
 }: {
   session: AuthSession;
   onLogout: () => void;
   onSessionRefreshed: (session: AuthSession) => void;
+  themePreference: ThemePreference;
+  onThemePreferenceChange: (preference: ThemePreference) => void;
 }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [autoLaunch, setAutoLaunch] = useState(false);
@@ -1518,6 +1582,10 @@ function Dashboard({
             />
             Git使用代理
           </label>
+          <ThemeControl
+            onChange={onThemePreferenceChange}
+            preference={themePreference}
+          />
         </div>
         <p
           className={`message ${messageTone === "warning" || status?.lastError ? "warning" : ""}`}
@@ -1836,16 +1904,49 @@ export default function App() {
   const [session, setSession] = useState<AuthSession | null>(() =>
     getSession(),
   );
+  const [themePreference, setThemePreference] = useState<ThemePreference>(
+    getStoredThemePreference,
+  );
+
+  useLayoutEffect(() => {
+    applyThemePreference(themePreference);
+  }, [themePreference]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleSystemThemeChange = () => {
+      if (themePreference === "system") applyThemePreference("system");
+    };
+    mediaQuery.addEventListener("change", handleSystemThemeChange);
+    return () =>
+      mediaQuery.removeEventListener("change", handleSystemThemeChange);
+  }, [themePreference]);
+
+  const updateThemePreference = (preference: ThemePreference) => {
+    setThemePreference(preference);
+    try {
+      window.localStorage.setItem(THEME_PREFERENCE_KEY, preference);
+    } catch {
+      // The in-memory setting still applies for this session.
+    }
+  };
+
   return session ? (
     <Dashboard
       session={session}
       onSessionRefreshed={setSession}
+      onThemePreferenceChange={updateThemePreference}
+      themePreference={themePreference}
       onLogout={() => {
         void logout();
         setSession(null);
       }}
     />
   ) : (
-    <AuthPage onAuthenticated={setSession} />
+    <AuthPage
+      onAuthenticated={setSession}
+      onThemePreferenceChange={updateThemePreference}
+      themePreference={themePreference}
+    />
   );
 }

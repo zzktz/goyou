@@ -14,6 +14,12 @@
 * {
   box-sizing: border-box;
 }
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
 html,
 body,
 #root {
@@ -58,6 +64,31 @@ button:disabled {
   align-items: center;
   gap: 14px;
   margin-bottom: clamp(24px, 5vh, 38px);
+}
+.theme-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: #718096;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.theme-control select {
+  min-height: 28px;
+  border: 1px solid #d4dde6;
+  border-radius: 7px;
+  color: #40546b;
+  background: #f8fafc;
+  cursor: pointer;
+  font-size: 11px;
+  outline: 0;
+  padding: 4px 7px;
+}
+.theme-control select:focus {
+  border-color: #5293bd;
+  box-shadow: 0 0 0 3px #5293bd18;
 }
 .auth-brand strong {
   display: block;
@@ -1218,6 +1249,413 @@ input[type="checkbox"] {
   border-color: #f2d49a;
   color: #a7650d;
   background: #fffaf0;
+}
+
+/* Explicit dark theme for the authentication screen. */
+html[data-theme="dark"] .auth-shell {
+  color: #e5ebf4;
+  background: #142842;
+}
+html[data-theme="dark"] .auth-card {
+  background: #1c3150;
+}
+html[data-theme="dark"] .auth-brand strong,
+html[data-theme="dark"] .auth-intro h1 {
+  color: #edf2f8;
+}
+html[data-theme="dark"] .auth-brand small,
+html[data-theme="dark"] .auth-intro > p:last-child {
+  color: #aebbd0;
+}
+html[data-theme="dark"] .brand-version {
+  border-color: #526783;
+  color: #b8c6d8;
+  background: #243957;
+}
+html[data-theme="dark"] .auth-form label {
+  color: #c2cede;
+}
+html[data-theme="dark"] .auth-form input {
+  border-color: #49617f;
+  color: #e7edf6;
+  caret-color: #e7edf6;
+  background: #1d3250;
+}
+html[data-theme="dark"] .auth-form input::placeholder {
+  color: #8294aa;
+}
+html[data-theme="dark"] .auth-form input:focus {
+  border-color: #29df68;
+  background: #223957;
+  box-shadow: 0 0 0 3px #29df6826;
+}
+html[data-theme="dark"] .auth-form input[readonly] {
+  color: #afbdd0;
+  background: #223957;
+}
+html[data-theme="dark"] .password-toggle {
+  color: #aebbd0;
+}
+html[data-theme="dark"] .password-toggle:hover,
+html[data-theme="dark"] .password-toggle:focus-visible {
+  color: #82f2a5;
+  background: #20543a;
+}
+html[data-theme="dark"] .remember-option,
+html[data-theme="dark"] .text-button,
+html[data-theme="dark"] .auth-mode-button {
+  color: #a7f5bc;
+}
+html[data-theme="dark"] .auth-error {
+  border-color: #70413f;
+  color: #ffd1c7;
+  background: #4d2e35;
+}
+html[data-theme="dark"] .auth-success {
+  border-color: #2d7752;
+  color: #a7f5bc;
+  background: #20543a;
+}
+html[data-theme="dark"] .code-button {
+  border-color: #49617f;
+  color: #a7f5bc;
+  background: #20543a;
+}
+html[data-theme="dark"] .code-button:hover:not(:disabled) {
+  border-color: #37dc70;
+  background: #286448;
+}
+html[data-theme="dark"] .theme-control {
+  color: #aebbd0;
+}
+html[data-theme="dark"] .theme-control select {
+  border-color: #49617f;
+  color: #d8e2ef;
+  background: #243957;
+}
+
+/* Light theme restores the 1.0.49 dashboard and dialog palette. */
+html[data-theme="light"] .dashboard-shell {
+  padding: 34px;
+  color: #142238;
+  background: #edf3f8;
+}
+html[data-theme="light"] .dashboard-card {
+  max-width: 1050px;
+  min-height: calc(100vh - 68px);
+  padding: 31px 34px;
+  border: 1px solid #dbe4ed;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 20px 55px #183d5b0e;
+}
+html[data-theme="light"] .dashboard-card header {
+  align-items: flex-start;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+html[data-theme="light"] .dashboard-card header .member-info {
+  position: static;
+  margin-left: 0;
+  opacity: 1;
+}
+html[data-theme="light"] .dashboard-card header .lease-summary {
+  display: block;
+  color: #7c8b9a;
+}
+html[data-theme="light"] .dashboard-title-row {
+  gap: 14px;
+}
+html[data-theme="light"] .dashboard-title-row h1 {
+  overflow: visible;
+  color: #162a41;
+  font-size: 26px;
+  text-overflow: clip;
+  white-space: normal;
+}
+html[data-theme="light"] .dashboard-version {
+  border-color: #dbe5ee;
+  color: #7e91a4;
+  background: #f5f8fb;
+}
+html[data-theme="light"] .dashboard-version:hover,
+html[data-theme="light"] .dashboard-version:focus-visible {
+  border-color: #9abbd0;
+  color: #1768a7;
+  background: #edf7fd;
+}
+html[data-theme="light"] .dashboard-brand-mark {
+  background: #1768a7;
+  box-shadow: 0 6px 14px #1768a726;
+}
+html[data-theme="light"] .dashboard-brand-mark span {
+  background: #dff1ff;
+}
+html[data-theme="light"] .brand-kicker,
+html[data-theme="light"] .proxy-mode,
+html[data-theme="light"] .lease-summary {
+  color: #7c8b9a;
+}
+html[data-theme="light"] .account-name-button {
+  color: #32465e;
+}
+html[data-theme="light"] .account-name-button:hover,
+html[data-theme="light"] .account-name-button:focus-visible {
+  color: #1768a7;
+}
+html[data-theme="light"] .account-avatar {
+  color: #1b648f;
+  background: #dff0fa;
+  box-shadow: inset 0 0 0 1px #b7d0e1;
+}
+html[data-theme="light"] .dashboard-actions {
+  margin-top: 30px;
+}
+html[data-theme="light"] .dashboard-actions button {
+  border-radius: 6px;
+}
+html[data-theme="light"] .primary-action {
+  color: #fff;
+  background: #1769aa;
+  box-shadow: none;
+}
+html[data-theme="light"] .primary-action:hover:not(:disabled) {
+  background: #125b91;
+}
+html[data-theme="light"] .danger {
+  color: #fff;
+  background: #b42318;
+}
+html[data-theme="light"] .secondary {
+  color: #52657a;
+  background: #e9eef3;
+}
+html[data-theme="light"] dl {
+  gap: 10px;
+  margin-top: 27px;
+}
+html[data-theme="light"] dl > div,
+html[data-theme="light"] .traffic-card,
+html[data-theme="light"] .proxy-status-card {
+  border-color: #dce4eb;
+  border-radius: 7px;
+  background: #f8fbfd;
+}
+html[data-theme="light"] .traffic-card,
+html[data-theme="light"] .proxy-status-card {
+  border-radius: 7px;
+}
+html[data-theme="light"] dt,
+html[data-theme="light"] .traffic-card-header,
+html[data-theme="light"] .proxy-status-title,
+html[data-theme="light"] .proxy-status-label,
+html[data-theme="light"] .settings-row label {
+  color: #586b7e;
+}
+html[data-theme="light"] .settings-row {
+  justify-content: flex-start;
+  gap: 19px;
+  margin-top: 0;
+}
+html[data-theme="light"] dd,
+html[data-theme="light"] .traffic-card-header strong {
+  color: #283c52;
+}
+html[data-theme="light"] .traffic-progress {
+  background: #dce8f0;
+}
+html[data-theme="light"] .traffic-progress span {
+  background: #1769aa;
+}
+html[data-theme="light"] .traffic-card small {
+  color: #738295;
+}
+html[data-theme="light"] .proxy-status-indicator.running {
+  color: #126a4a;
+  background: #e8f7ef;
+}
+html[data-theme="light"] .proxy-status-indicator.running i {
+  background: #16a36d;
+}
+html[data-theme="light"] .proxy-status-indicator.stopped {
+  color: #546171;
+  background: #eef1f4;
+}
+html[data-theme="light"] .proxy-status-indicator.error {
+  color: #a52b22;
+  background: #fff0ef;
+}
+html[data-theme="light"] .proxy-status-value.is-active {
+  color: #126a4a;
+}
+html[data-theme="light"] .proxy-status-value.is-inactive {
+  color: #546171;
+}
+html[data-theme="light"] input[type="checkbox"] {
+  accent-color: #1769aa;
+}
+html[data-theme="light"] .message {
+  margin-top: 20px;
+  border-color: #dce8f0;
+  color: #68798a;
+  background: #f5f9fc;
+}
+html[data-theme="light"] .message.warning {
+  border-color: #f2d49a;
+  color: #a7650d;
+  background: #fffaf0;
+}
+html[data-theme="light"] .theme-control {
+  color: #586b7e;
+}
+html[data-theme="light"] .theme-control select {
+  border-color: #d4dde6;
+  color: #40546b;
+  background: #f8fafc;
+}
+
+/* Light dialog/menu colors. */
+html[data-theme="light"] .modal-backdrop {
+  background: #102a4366;
+}
+html[data-theme="light"] .confirm-dialog {
+  border-color: #dbe4ed;
+  color: #172940;
+  background: #fff;
+  box-shadow: 0 20px 55px #183d5b33;
+}
+html[data-theme="light"] .confirm-dialog h2,
+html[data-theme="light"] .feedback-dialog h2 {
+  color: #152942;
+}
+html[data-theme="light"] .confirm-dialog p,
+html[data-theme="light"] .feedback-dialog-intro,
+html[data-theme="light"] .profile-field > span,
+html[data-theme="light"] .feedback-dialog small,
+html[data-theme="light"] .update-dialog small {
+  color: #718096;
+}
+html[data-theme="light"] .cancel-button {
+  color: #52657a;
+  background: #e9eef3;
+}
+html[data-theme="light"] .cancel-button:hover:not(:disabled),
+html[data-theme="light"] .cancel-button:focus-visible {
+  color: #40546b;
+  background: #dfe7ee;
+}
+html[data-theme="light"] .confirm-button {
+  color: #fff;
+  background: #b42318;
+}
+html[data-theme="light"] .confirm-button:hover:not(:disabled),
+html[data-theme="light"] .confirm-button:focus-visible {
+  background: #c52d21;
+}
+html[data-theme="light"] .profile-field input,
+html[data-theme="light"] .profile-field p,
+html[data-theme="light"] .feedback-textarea {
+  border-color: #d4dde6;
+  color: #172940;
+  background: #fff;
+}
+html[data-theme="light"] .profile-field p {
+  color: #718096;
+  background: #f6f8fa;
+}
+html[data-theme="light"] .profile-field input:focus,
+html[data-theme="light"] .feedback-textarea:focus {
+  border-color: #5293bd;
+  box-shadow: 0 0 0 3px #5293bd18;
+}
+html[data-theme="light"] .feedback-upload-button {
+  color: #1768a7;
+  background: #edf7fd;
+}
+html[data-theme="light"] .feedback-files li,
+html[data-theme="light"] .feedback-history-item {
+  color: #596b7c;
+  background: #f5f8fb;
+}
+html[data-theme="light"] .feedback-history {
+  border-top-color: #e4ebf1;
+}
+html[data-theme="light"] .feedback-history > strong {
+  color: #3a4c61;
+}
+html[data-theme="light"] .feedback-history-item p {
+  color: #52657a;
+}
+html[data-theme="light"] .feedback-reply {
+  border-left-color: #73a7c8;
+  color: #2e617f;
+}
+html[data-theme="light"] .feedback-submit-button {
+  color: #fff;
+  background: #1768a7;
+}
+html[data-theme="light"] .update-progress {
+  background: #dce8f0;
+}
+html[data-theme="light"] .update-progress span {
+  background: #1769aa;
+}
+html[data-theme="light"] .feedback-close-button {
+  color: #718096;
+}
+html[data-theme="light"] .feedback-close-button:hover:not(:disabled),
+html[data-theme="light"] .feedback-close-button:focus-visible {
+  color: #40546b;
+  background: #edf2f6;
+}
+html[data-theme="light"] .account-dropdown {
+  border-color: #dbe5ee;
+  background: #fff;
+  box-shadow: 0 10px 25px #183d5b1f;
+}
+html[data-theme="light"] .account-dropdown button {
+  color: #40546b;
+}
+html[data-theme="light"] .account-dropdown button:hover:not(:disabled),
+html[data-theme="light"] .account-dropdown button:focus-visible {
+  color: #1768a7;
+  background: #edf7fd;
+}
+html[data-theme="light"] .account-dropdown button:last-child {
+  color: #9e3c38;
+}
+html[data-theme="light"]
+  .account-dropdown
+  button:last-child:hover:not(:disabled),
+html[data-theme="light"] .account-dropdown button:last-child:focus-visible {
+  color: #a52b22;
+  background: #fff3f2;
+}
+
+@media (max-width: 650px) {
+  html[data-theme="light"] .dashboard-shell {
+    padding: 0;
+  }
+  html[data-theme="light"] .dashboard-card {
+    min-height: 100vh;
+    padding: 24px 20px;
+    border: 0;
+    border-radius: 0;
+  }
+  html[data-theme="light"] .dashboard-card header {
+    padding: 0;
+  }
+}
+@media (max-width: 380px) {
+  .auth-brand {
+    flex-wrap: wrap;
+  }
+  .auth-brand .theme-control {
+    width: 100%;
+    justify-content: flex-end;
+    margin-top: -8px;
+  }
 }
 @media (max-width: 800px) {
   .auth-card {
